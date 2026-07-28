@@ -1,0 +1,52 @@
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# JavaScript
+node_modules/
+apps/web/dist/
+apps/web/.vite/
+pnpm-debug.log*
+
+# Runtime media and state
+data/*
+!data/.gitkeep
+storage/
+tmp/
+logs/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Models and datasets
+models/weights/
+ml/data/
+ml/artifacts/
+*.onnx
+*.pt
+*.pth
+*.ckpt
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
