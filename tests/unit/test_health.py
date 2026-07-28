@@ -15,4 +15,3 @@ def test_health_endpoint() -> None:
         assert response.json() == {"status": "ok", "version": "0.1.0"}
 
     asyncio.run(request())
-

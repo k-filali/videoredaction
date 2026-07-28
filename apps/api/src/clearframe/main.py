@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from clearframe import __version__
 from clearframe.config import get_settings
+from clearframe.database import database
 
 
 @asynccontextmanager
@@ -15,6 +16,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     settings.storage_root.mkdir(parents=True, exist_ok=True)
     Path("data").mkdir(parents=True, exist_ok=True)
+    database.create_schema()
     yield
 
 
