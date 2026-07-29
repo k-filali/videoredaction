@@ -37,3 +37,4 @@ USER clearframe
 EXPOSE 8000
 
 ENTRYPOINT ["/app/docker/api-entrypoint.sh"]
+CMD ["python", "-m", "clearframe.main"]

@@ -3,5 +3,7 @@ set -eu
 umask 027
 
 mkdir -p "${TMPDIR:-/tmp}"
-alembic upgrade head
-exec python -m clearframe.main
+if [ "${CLEARFRAME_RUN_MIGRATIONS:-true}" = "true" ]; then
+    alembic upgrade head
+fi
+exec "$@"

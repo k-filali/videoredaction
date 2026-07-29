@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -133,10 +134,11 @@ app = create_app()
 
 def run() -> None:
     settings = get_settings()
+    port = int(os.environ.get("PORT", settings.api_port))
     uvicorn.run(
         "clearframe.main:app",
         host=settings.api_host,
-        port=settings.api_port,
+        port=port,
         reload=settings.env == "development",
     )
 
