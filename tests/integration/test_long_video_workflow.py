@@ -2,7 +2,7 @@ import asyncio
 from pathlib import Path
 
 from httpx import ASGITransport, AsyncClient
-from tests.helpers import generate_test_video
+from tests.helpers import MOCK_MODEL_REGISTRY_PATH, generate_test_video
 
 from clearframe.config import Settings
 from clearframe.database import Database
@@ -19,6 +19,7 @@ def test_thirty_second_upload_completes_reviewed_export(tmp_path: Path) -> None:
         env="test",
         build_id="long-video-integration",
         log_level="WARNING",
+        model_registry_path=MOCK_MODEL_REGISTRY_PATH,
     )
     services = ServiceContainer.build(settings, database)
     app = create_app(settings=settings, database=database, services=services)

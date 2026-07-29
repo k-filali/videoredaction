@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from tests.helpers import generate_test_video
+from tests.helpers import MOCK_MODEL_REGISTRY_PATH, generate_test_video
 
 from clearframe.api.processing import router
 from clearframe.database import Database
@@ -48,7 +48,12 @@ def test_processing_api_returns_latest_run_and_metrics(tmp_path: Path) -> None:
         session.commit()
 
     app = FastAPI()
-    app.state.processing_service = ProcessingService(database, storage, runner)
+    app.state.processing_service = ProcessingService(
+        database,
+        storage,
+        runner,
+        registry_path=MOCK_MODEL_REGISTRY_PATH,
+    )
     app.include_router(router)
 
     async def exercise() -> None:

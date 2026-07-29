@@ -1,0 +1,24 @@
+schema_version: 1
+models:
+  - id: mock-plate-v1
+    display_name: Deterministic test plate detector
+    adapter: deterministic_mock
+    model_version: "1.0.0"
+    adapter_version: "1.0.0"
+    enabled: true
+    deployment_allowed: true
+    research_only: false
+    supported_classes:
+      - license_plate
+    thresholds:
+      confidence: 0.99
+      nms_iou: 0.40
+      min_size_pixels: 24
+    weights:
+      source: none
+      path: null
+      sha256: null
+    license:
+      spdx_id: LicenseRef-ClearFrame-Project
+      name: ClearFrame test fixture
+      url: null

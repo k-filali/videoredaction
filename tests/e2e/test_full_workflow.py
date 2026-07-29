@@ -3,7 +3,7 @@ from pathlib import Path
 
 import cv2
 from httpx import ASGITransport, AsyncClient
-from tests.helpers import generate_test_video
+from tests.helpers import MOCK_MODEL_REGISTRY_PATH, generate_test_video
 
 from clearframe.config import Settings
 from clearframe.database import Database
@@ -19,6 +19,7 @@ def test_upload_detect_review_export_workflow(tmp_path: Path) -> None:
         storage_root=tmp_path / "storage",
         max_upload_mb=10,
         env="test",
+        model_registry_path=MOCK_MODEL_REGISTRY_PATH,
     )
     services = ServiceContainer.build(settings, database)
     app = create_app(settings=settings, database=database, services=services)

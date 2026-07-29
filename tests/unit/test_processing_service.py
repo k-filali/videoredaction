@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
-from tests.helpers import generate_test_video
+from tests.helpers import MOCK_MODEL_REGISTRY_PATH, generate_test_video
 
 from clearframe.database import Database
 from clearframe.domain.enums import JobStatus, RunStatus, VideoStatus
@@ -60,7 +60,12 @@ def _build_processing(
             )
         )
         session.commit()
-    service = ProcessingService(database, storage, runner)
+    service = ProcessingService(
+        database,
+        storage,
+        runner,
+        registry_path=MOCK_MODEL_REGISTRY_PATH,
+    )
     return database, storage, runner, service, video_id
 
 
@@ -98,7 +103,7 @@ def test_processing_rejects_disabled_detector_selection(tmp_path: Path) -> None:
     _, _, runner, service, video_id = _build_processing(tmp_path)
     try:
         with pytest.raises(DetectorSelectionError, match="disabled"):
-            service.request(video_id, model_ids=["opencv-haar-face"])
+            service.request(video_id, model_ids=["unavailable-model"])
     finally:
         runner.shutdown()
 
@@ -141,7 +146,12 @@ class _DuplicateProcessingService(ProcessingService):
 
 def test_nms_preserves_raw_detections_and_only_filters_tracking(tmp_path: Path) -> None:
     database, storage, runner, _, video_id = _build_processing(tmp_path)
-    service = _DuplicateProcessingService(database, storage, runner)
+    service = _DuplicateProcessingService(
+        database,
+        storage,
+        runner,
+        registry_path=MOCK_MODEL_REGISTRY_PATH,
+    )
     try:
         requested = service.request(video_id, sample_every_frames=3)
         runner.wait(requested.job.id, timeout=60)

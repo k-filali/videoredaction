@@ -3,6 +3,10 @@ from pathlib import Path
 
 from clearframe.media import MediaProcessor
 
+MOCK_MODEL_REGISTRY_PATH = (
+    Path(__file__).resolve().parent / "fixtures" / "mock-model-registry.yaml"
+)
+
 
 def generate_test_video(
     destination: Path,
@@ -53,4 +57,3 @@ def generate_test_video(
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return destination
-
