@@ -2,18 +2,25 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from itertools import pairwise
 from math import hypot
 from typing import Protocol, cast
 
 import cv2
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from clearframe.database import Database
-from clearframe.domain.enums import JobStatus, JobType, ReviewActionType
+from clearframe.domain.enums import (
+    JobStatus,
+    JobType,
+    ReprocessingSuggestionStatus,
+    ReviewActionType,
+)
 from clearframe.domain.geometry import NormalizedBox
-from clearframe.domain.review import TrackReviewState
+from clearframe.domain.review import ReviewCommand, ReviewSnapshot, TrackReviewState
 from clearframe.jobs import JobContext, LocalJobRunner
 from clearframe.models import (
     ProcessingJob,
@@ -24,6 +31,11 @@ from clearframe.models import (
     VideoAsset,
 )
 from clearframe.pipeline.detection import Frame
+from clearframe.services.review import (
+    RevisionConflictError,
+    append_review_action,
+    build_review_snapshot,
+)
 from clearframe.storage import LocalStorage
 
 
@@ -47,6 +59,13 @@ class ReprocessingConflictError(ReprocessingError):
 class RequestedReprocessing:
     job: ProcessingJob
     source_action_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SuggestionResolution:
+    suggestion: ReprocessingSuggestion
+    state: ReviewSnapshot
+    action: ReviewAction | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +229,247 @@ class ReprocessingService:
             for suggestion in suggestions:
                 session.expunge(suggestion)
             return suggestions
+
+    def accept_suggestion(
+        self,
+        video_id: str,
+        suggestion_id: str,
+        *,
+        expected_revision: int,
+        reviewer_session_id: str,
+        reason_code: str | None = None,
+    ) -> SuggestionResolution:
+        resolved_reason = self._resolution_metadata(
+            reviewer_session_id,
+            reason_code or "accepted_context_suggestion",
+        )
+        with self.database.session() as session:
+            suggestion = self._pending_suggestion(session, video_id, suggestion_id)
+            snapshot = self._review_snapshot(
+                session,
+                video_id,
+                expected_revision,
+            )
+            track = snapshot.tracks.get(suggestion.track_id)
+            if track is None:
+                raise ReprocessingValidationError("suggestion track is not available")
+            if not track.active:
+                raise ReprocessingConflictError("suggestion track is no longer active")
+            if track.class_name != suggestion.class_name:
+                raise ReprocessingConflictError("suggestion class no longer matches the track")
+            if not (
+                track.start_frame <= suggestion.frame_index <= track.end_frame
+                and track.start_ms <= suggestion.timestamp_ms <= track.end_ms
+            ):
+                raise ReprocessingConflictError("suggestion is outside the current track span")
+            if any(
+                keyframe.frame_index == suggestion.frame_index and keyframe.locked
+                for keyframe in track.keyframes
+            ):
+                raise ReprocessingConflictError(
+                    "a reviewer keyframe already exists at the suggestion frame"
+                )
+            if not suggestion.seed_locked:
+                raise ReprocessingValidationError("suggestion provenance is not locked")
+
+            action, state = append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.RESIZE_REGION,
+                    expected_revision=expected_revision,
+                    track_id=suggestion.track_id,
+                    frame_index=suggestion.frame_index,
+                    timestamp_ms=suggestion.timestamp_ms,
+                    reason_code=resolved_reason,
+                    payload={
+                        "bbox": {
+                            "x1": suggestion.x1,
+                            "y1": suggestion.y1,
+                            "x2": suggestion.x2,
+                            "y2": suggestion.y2,
+                        }
+                    },
+                ),
+                reviewer_session_id=reviewer_session_id,
+                commit=False,
+            )
+            self._resolve_pending(
+                session,
+                video_id,
+                suggestion_id,
+                status=ReprocessingSuggestionStatus.ACCEPTED,
+                reviewer_session_id=reviewer_session_id,
+                reason_code=resolved_reason,
+                action_id=action.id,
+            )
+            session.commit()
+            session.refresh(suggestion)
+            session.expunge(suggestion)
+            return SuggestionResolution(
+                suggestion=suggestion,
+                state=state,
+                action=action,
+            )
+
+    def dismiss_suggestion(
+        self,
+        video_id: str,
+        suggestion_id: str,
+        *,
+        expected_revision: int,
+        reviewer_session_id: str,
+        reason_code: str | None = None,
+    ) -> SuggestionResolution:
+        resolved_reason = self._resolution_metadata(
+            reviewer_session_id,
+            reason_code or "dismissed_context_suggestion",
+        )
+        with self.database.session() as session:
+            suggestion = self._pending_suggestion(session, video_id, suggestion_id)
+            snapshot = self._review_snapshot(
+                session,
+                video_id,
+                expected_revision,
+            )
+            current_revision = (
+                select(VideoAsset.review_revision)
+                .where(VideoAsset.id == video_id)
+                .scalar_subquery()
+            )
+            result = cast(
+                CursorResult[object],
+                session.execute(
+                    update(ReprocessingSuggestion)
+                    .where(
+                        ReprocessingSuggestion.id == suggestion_id,
+                        ReprocessingSuggestion.video_id == video_id,
+                        ReprocessingSuggestion.status
+                        == ReprocessingSuggestionStatus.PENDING,
+                        current_revision == expected_revision,
+                    )
+                    .values(
+                        status=ReprocessingSuggestionStatus.DISMISSED,
+                        resolved_at=datetime.now(UTC),
+                        resolved_by_session_id=reviewer_session_id,
+                        resolution_reason_code=resolved_reason,
+                        resolution_action_id=None,
+                    )
+                    .execution_options(synchronize_session=False)
+                ),
+            )
+            if result.rowcount != 1:
+                self._raise_resolution_race(
+                    session,
+                    video_id,
+                    suggestion_id,
+                    expected_revision,
+                )
+            session.commit()
+            session.refresh(suggestion)
+            session.expunge(suggestion)
+            return SuggestionResolution(
+                suggestion=suggestion,
+                state=snapshot,
+                action=None,
+            )
+
+    @staticmethod
+    def _resolution_metadata(
+        reviewer_session_id: str,
+        reason_code: str,
+    ) -> str:
+        if not reviewer_session_id or len(reviewer_session_id) > 64:
+            raise ReprocessingValidationError("reviewer session is invalid")
+        if not reason_code or len(reason_code) > 64:
+            raise ReprocessingValidationError("resolution reason is invalid")
+        return reason_code
+
+    @staticmethod
+    def _pending_suggestion(
+        session: Session,
+        video_id: str,
+        suggestion_id: str,
+    ) -> ReprocessingSuggestion:
+        suggestion = session.get(ReprocessingSuggestion, suggestion_id)
+        if suggestion is None or suggestion.video_id != video_id:
+            raise ReprocessingNotFoundError("reprocessing suggestion not found")
+        if suggestion.status != ReprocessingSuggestionStatus.PENDING:
+            raise ReprocessingConflictError("reprocessing suggestion is already resolved")
+        return suggestion
+
+    @staticmethod
+    def _review_snapshot(
+        session: Session,
+        video_id: str,
+        expected_revision: int,
+    ) -> ReviewSnapshot:
+        video = session.get(VideoAsset, video_id)
+        if video is None:
+            raise ReprocessingNotFoundError("video not found")
+        if video.review_revision != expected_revision:
+            raise RevisionConflictError(expected_revision, video.review_revision)
+        return build_review_snapshot(session, video_id)
+
+    @staticmethod
+    def _resolve_pending(
+        session: Session,
+        video_id: str,
+        suggestion_id: str,
+        *,
+        status: ReprocessingSuggestionStatus,
+        reviewer_session_id: str,
+        reason_code: str,
+        action_id: str | None,
+    ) -> None:
+        result = cast(
+            CursorResult[object],
+            session.execute(
+                update(ReprocessingSuggestion)
+                .where(
+                    ReprocessingSuggestion.id == suggestion_id,
+                    ReprocessingSuggestion.video_id == video_id,
+                    ReprocessingSuggestion.status
+                    == ReprocessingSuggestionStatus.PENDING,
+                )
+                .values(
+                    status=status,
+                    resolved_at=datetime.now(UTC),
+                    resolved_by_session_id=reviewer_session_id,
+                    resolution_reason_code=reason_code,
+                    resolution_action_id=action_id,
+                )
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        if result.rowcount != 1:
+            session.rollback()
+            raise ReprocessingConflictError(
+                "reprocessing suggestion was resolved concurrently"
+            )
+
+    @staticmethod
+    def _raise_resolution_race(
+        session: Session,
+        video_id: str,
+        suggestion_id: str,
+        expected_revision: int,
+    ) -> None:
+        session.rollback()
+        current_revision = session.scalar(
+            select(VideoAsset.review_revision).where(VideoAsset.id == video_id)
+        )
+        if current_revision is not None and current_revision != expected_revision:
+            raise RevisionConflictError(expected_revision, current_revision)
+        suggestion_status = session.scalar(
+            select(ReprocessingSuggestion.status).where(
+                ReprocessingSuggestion.id == suggestion_id,
+                ReprocessingSuggestion.video_id == video_id,
+            )
+        )
+        if suggestion_status is None:
+            raise ReprocessingNotFoundError("reprocessing suggestion not found")
+        raise ReprocessingConflictError("reprocessing suggestion is already resolved")
 
     def _load_seed(self, session: Session, source_action_id: str) -> _Seed:
         action = session.get(ReviewAction, source_action_id)

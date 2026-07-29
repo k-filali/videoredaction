@@ -26,7 +26,7 @@ from clearframe.observability import RequestTraceMiddleware, configure_observabi
 from clearframe.services.container import ServiceContainer
 from clearframe.services.processing import ProcessingService
 
-SCHEMA_HEAD = "f2a39c7e51d4"
+SCHEMA_HEAD = "c7b28f914d62"
 
 
 @asynccontextmanager

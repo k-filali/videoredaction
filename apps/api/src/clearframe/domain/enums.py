@@ -97,3 +97,9 @@ class JobStatus(StrEnum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+class ReprocessingSuggestionStatus(StrEnum):
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    DISMISSED = "DISMISSED"

@@ -9,6 +9,7 @@ from clearframe.domain.enums import (
     JobType,
     RedactionClass,
     RedactionStyle,
+    ReprocessingSuggestionStatus,
     ReviewActionType,
     VideoStatus,
 )
@@ -185,9 +186,13 @@ class ReprocessingSuggestionRead(BaseModel):
     direction: str
     propagation_method: str
     seed_locked: bool
-    status: str
+    status: ReprocessingSuggestionStatus
     metadata: dict[str, Any]
     created_at: datetime
+    resolved_at: datetime | None
+    resolved_by_session_id: str | None
+    resolution_reason_code: str | None
+    resolution_action_id: str | None
 
     @classmethod
     def from_model(
@@ -214,10 +219,25 @@ class ReprocessingSuggestionRead(BaseModel):
             direction=suggestion.direction,
             propagation_method=suggestion.propagation_method,
             seed_locked=suggestion.seed_locked,
-            status=suggestion.status,
+            status=ReprocessingSuggestionStatus(suggestion.status),
             metadata=suggestion.metadata_json,
             created_at=suggestion.created_at,
+            resolved_at=suggestion.resolved_at,
+            resolved_by_session_id=suggestion.resolved_by_session_id,
+            resolution_reason_code=suggestion.resolution_reason_code,
+            resolution_action_id=suggestion.resolution_action_id,
         )
+
+
+class ReprocessingSuggestionResolution(BaseModel):
+    expected_revision: int = Field(ge=0)
+    reason_code: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class ReprocessingSuggestionResolutionRead(BaseModel):
+    suggestion: ReprocessingSuggestionRead
+    state: ReviewSnapshot
+    action: AuditActionRead | None
 
 
 class AuditLogRead(BaseModel):

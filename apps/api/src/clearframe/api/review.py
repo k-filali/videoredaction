@@ -10,6 +10,8 @@ from clearframe.api.schemas import (
     JobRead,
     ManualRegionCreate,
     ReprocessingSuggestionRead,
+    ReprocessingSuggestionResolution,
+    ReprocessingSuggestionResolutionRead,
     ReviewMutationRead,
 )
 from clearframe.database import Database
@@ -17,7 +19,11 @@ from clearframe.domain.enums import ReviewActionType
 from clearframe.domain.review import ReviewCommand, ReviewSnapshot
 from clearframe.models import ReviewAction
 from clearframe.services.container import ServiceContainer
-from clearframe.services.reprocessing import ReprocessingError
+from clearframe.services.reprocessing import (
+    ReprocessingConflictError,
+    ReprocessingError,
+    ReprocessingNotFoundError,
+)
 from clearframe.services.review import (
     ReviewError,
     ReviewUnavailableError,
@@ -59,6 +65,23 @@ def _raise_review_http_error(error: ReviewError) -> None:
         ) from error
     if isinstance(error, (VideoNotFoundError, TrackNotFoundError)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=str(error),
+    ) from error
+
+
+def _raise_reprocessing_http_error(error: ReprocessingError) -> None:
+    if isinstance(error, ReprocessingNotFoundError):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    if isinstance(error, ReprocessingConflictError):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=str(error),
@@ -202,6 +225,74 @@ def get_reprocessing_suggestions(
         ReprocessingSuggestionRead.from_model(suggestion)
         for suggestion in suggestions
     ]
+
+
+@router.post(
+    "/{video_id}/reprocessing-suggestions/{suggestion_id}/accept",
+    response_model=ReprocessingSuggestionResolutionRead,
+)
+def accept_reprocessing_suggestion(
+    video_id: str,
+    suggestion_id: str,
+    resolution: ReprocessingSuggestionResolution,
+    services: ServicesDependency,
+    reviewer_session: ReviewerSession = "local-demo",
+) -> ReprocessingSuggestionResolutionRead:
+    try:
+        result = services.reprocess.accept_suggestion(
+            video_id,
+            suggestion_id,
+            expected_revision=resolution.expected_revision,
+            reviewer_session_id=reviewer_session,
+            reason_code=resolution.reason_code,
+        )
+    except ReviewError as exc:
+        _raise_review_http_error(exc)
+        raise AssertionError("unreachable") from exc
+    except ReprocessingError as exc:
+        _raise_reprocessing_http_error(exc)
+        raise AssertionError("unreachable") from exc
+    return ReprocessingSuggestionResolutionRead(
+        suggestion=ReprocessingSuggestionRead.from_model(result.suggestion),
+        state=result.state,
+        action=(
+            AuditActionRead.from_model(result.action)
+            if result.action is not None
+            else None
+        ),
+    )
+
+
+@router.post(
+    "/{video_id}/reprocessing-suggestions/{suggestion_id}/dismiss",
+    response_model=ReprocessingSuggestionResolutionRead,
+)
+def dismiss_reprocessing_suggestion(
+    video_id: str,
+    suggestion_id: str,
+    resolution: ReprocessingSuggestionResolution,
+    services: ServicesDependency,
+    reviewer_session: ReviewerSession = "local-demo",
+) -> ReprocessingSuggestionResolutionRead:
+    try:
+        result = services.reprocess.dismiss_suggestion(
+            video_id,
+            suggestion_id,
+            expected_revision=resolution.expected_revision,
+            reviewer_session_id=reviewer_session,
+            reason_code=resolution.reason_code,
+        )
+    except ReviewError as exc:
+        _raise_review_http_error(exc)
+        raise AssertionError("unreachable") from exc
+    except ReprocessingError as exc:
+        _raise_reprocessing_http_error(exc)
+        raise AssertionError("unreachable") from exc
+    return ReprocessingSuggestionResolutionRead(
+        suggestion=ReprocessingSuggestionRead.from_model(result.suggestion),
+        state=result.state,
+        action=None,
+    )
 
 
 @router.get("/{video_id}/audit", response_model=AuditLogRead)

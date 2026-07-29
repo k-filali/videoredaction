@@ -26,6 +26,7 @@ from clearframe.domain.enums import (
     JobType,
     ProposalSource,
     RedactionStyle,
+    ReprocessingSuggestionStatus,
     RunStatus,
     TrackSource,
     TrackStatus,
@@ -311,9 +312,19 @@ class ReprocessingSuggestion(Base):
     direction: Mapped[str] = mapped_column(String(16))
     propagation_method: Mapped[str] = mapped_column(String(32))
     seed_locked: Mapped[bool] = mapped_column(Boolean, default=True)
-    status: Mapped[str] = mapped_column(String(24), default="PENDING")
+    status: Mapped[str] = mapped_column(
+        String(24),
+        default=ReprocessingSuggestionStatus.PENDING,
+    )
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_by_session_id: Mapped[str | None] = mapped_column(String(64))
+    resolution_reason_code: Mapped[str | None] = mapped_column(String(64))
+    resolution_action_id: Mapped[str | None] = mapped_column(
+        ForeignKey("review_actions.id", ondelete="RESTRICT"),
+        index=True,
+    )
 
 
 class ImmutableAuditError(RuntimeError):

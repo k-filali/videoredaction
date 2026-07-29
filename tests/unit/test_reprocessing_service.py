@@ -10,11 +10,13 @@ from clearframe.domain.enums import (
     InterpolationMode,
     JobStatus,
     JobType,
+    ReprocessingSuggestionStatus,
     ReviewActionType,
     TrackSource,
     TrackStatus,
     VideoStatus,
 )
+from clearframe.domain.geometry import NormalizedBox
 from clearframe.domain.review import ReviewCommand
 from clearframe.jobs import LocalJobRunner
 from clearframe.media import MediaProcessor
@@ -28,9 +30,10 @@ from clearframe.models import (
 )
 from clearframe.services.reprocessing import (
     ReprocessingConflictError,
+    ReprocessingNotFoundError,
     ReprocessingService,
 )
-from clearframe.services.review import append_review_action
+from clearframe.services.review import RevisionConflictError, append_review_action
 from clearframe.storage import LocalStorage
 
 
@@ -140,6 +143,179 @@ def _create_corrected_action(database: Database, video_id: str, fps: float) -> R
             reviewer_session_id="reviewer-test",
         )
         return action
+
+
+def _create_suggestion(
+    database: Database,
+    video_id: str,
+    source_action: ReviewAction,
+    fps: float,
+    *,
+    frame_index: int = 8,
+) -> str:
+    assert source_action.track_id is not None
+    assert source_action.frame_index is not None
+    with database.session() as session:
+        job = ProcessingJob(
+            video_id=video_id,
+            job_type=JobType.REPROCESS,
+            status=JobStatus.COMPLETED,
+        )
+        session.add(job)
+        session.flush()
+        suggestion = ReprocessingSuggestion(
+            video_id=video_id,
+            source_action_id=source_action.id,
+            job_id=job.id,
+            track_id=source_action.track_id,
+            source_revision=source_action.revision,
+            class_name="license_plate",
+            seed_frame_index=source_action.frame_index,
+            frame_index=frame_index,
+            timestamp_ms=round(frame_index * 1000 / fps),
+            x1=0.31,
+            y1=0.57,
+            x2=0.61,
+            y2=0.72,
+            confidence=0.74,
+            direction="forward",
+            propagation_method="interpolation",
+            seed_locked=True,
+            status=ReprocessingSuggestionStatus.PENDING,
+            metadata_json={"distance_frames": 1},
+        )
+        session.add(suggestion)
+        session.commit()
+        return suggestion.id
+
+
+def test_accept_suggestion_appends_locked_truth_without_reprocessing(
+    tmp_path: Path,
+) -> None:
+    database, storage, runner, video_id, fps = _build_context(tmp_path)
+    source_action = _create_corrected_action(database, video_id, fps)
+    suggestion_id = _create_suggestion(database, video_id, source_action, fps)
+    service = ReprocessingService(database, storage, runner, prefer_csrt=False)
+    try:
+        result = service.accept_suggestion(
+            video_id,
+            suggestion_id,
+            expected_revision=1,
+            reviewer_session_id="reviewer-resolution",
+            reason_code="reviewed_context",
+        )
+
+        assert result.action is not None
+        assert result.action.action_type == ReviewActionType.RESIZE_REGION
+        assert result.action.reason_code == "reviewed_context"
+        assert result.action.reviewer_session_id == "reviewer-resolution"
+        assert result.state.revision == 2
+        accepted_track = result.state.tracks["proposal-track"]
+        accepted_keyframe = next(
+            item for item in accepted_track.keyframes if item.frame_index == 8
+        )
+        assert accepted_keyframe.locked is True
+        assert accepted_keyframe.bbox == NormalizedBox(
+            x1=0.31,
+            y1=0.57,
+            x2=0.61,
+            y2=0.72,
+        )
+        assert result.suggestion.status == ReprocessingSuggestionStatus.ACCEPTED
+        assert result.suggestion.resolution_action_id == result.action.id
+        assert result.suggestion.resolved_by_session_id == "reviewer-resolution"
+        assert result.suggestion.resolution_reason_code == "reviewed_context"
+        assert result.suggestion.resolved_at is not None
+
+        with database.session() as session:
+            jobs = list(
+                session.scalars(
+                    select(ProcessingJob).where(
+                        ProcessingJob.video_id == video_id,
+                        ProcessingJob.job_type == JobType.REPROCESS,
+                    )
+                )
+            )
+            assert len(jobs) == 1
+    finally:
+        runner.shutdown()
+
+
+def test_dismiss_suggestion_records_resolution_without_changing_truth(
+    tmp_path: Path,
+) -> None:
+    database, storage, runner, video_id, fps = _build_context(tmp_path)
+    source_action = _create_corrected_action(database, video_id, fps)
+    suggestion_id = _create_suggestion(database, video_id, source_action, fps)
+    service = ReprocessingService(database, storage, runner, prefer_csrt=False)
+    try:
+        result = service.dismiss_suggestion(
+            video_id,
+            suggestion_id,
+            expected_revision=1,
+            reviewer_session_id="reviewer-dismiss",
+            reason_code="not_useful",
+        )
+
+        assert result.action is None
+        assert result.state.revision == 1
+        assert result.suggestion.status == ReprocessingSuggestionStatus.DISMISSED
+        assert result.suggestion.resolution_action_id is None
+        assert result.suggestion.resolved_by_session_id == "reviewer-dismiss"
+        assert result.suggestion.resolution_reason_code == "not_useful"
+        assert result.suggestion.resolved_at is not None
+        with database.session() as session:
+            video = session.get(VideoAsset, video_id)
+            actions = list(
+                session.scalars(
+                    select(ReviewAction).where(ReviewAction.video_id == video_id)
+                )
+            )
+            assert video is not None
+            assert video.review_revision == 1
+            assert len(actions) == 1
+
+        with pytest.raises(ReprocessingConflictError, match="already resolved"):
+            service.dismiss_suggestion(
+                video_id,
+                suggestion_id,
+                expected_revision=1,
+                reviewer_session_id="reviewer-dismiss",
+            )
+    finally:
+        runner.shutdown()
+
+
+def test_suggestion_resolution_rejects_wrong_video_and_stale_revision(
+    tmp_path: Path,
+) -> None:
+    database, storage, runner, video_id, fps = _build_context(tmp_path)
+    source_action = _create_corrected_action(database, video_id, fps)
+    suggestion_id = _create_suggestion(database, video_id, source_action, fps)
+    service = ReprocessingService(database, storage, runner, prefer_csrt=False)
+    try:
+        with pytest.raises(ReprocessingNotFoundError, match="not found"):
+            service.accept_suggestion(
+                "another-video",
+                suggestion_id,
+                expected_revision=1,
+                reviewer_session_id="reviewer-test",
+            )
+        with pytest.raises(RevisionConflictError) as stale:
+            service.accept_suggestion(
+                video_id,
+                suggestion_id,
+                expected_revision=0,
+                reviewer_session_id="reviewer-test",
+            )
+        assert stale.value.actual == 1
+        with database.session() as session:
+            suggestion = session.get(ReprocessingSuggestion, suggestion_id)
+            assert suggestion is not None
+            assert suggestion.status == ReprocessingSuggestionStatus.PENDING
+            assert suggestion.resolved_at is None
+    finally:
+        runner.shutdown()
 
 
 def test_reprocessing_persists_bounded_suggestions_without_mutating_truth(

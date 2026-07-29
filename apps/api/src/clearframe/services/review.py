@@ -554,6 +554,8 @@ def append_review_action(
     video_id: str,
     command: ReviewCommand,
     reviewer_session_id: str,
+    *,
+    commit: bool = True,
 ) -> tuple[ReviewAction, ReviewSnapshot]:
     video = session.get(VideoAsset, video_id)
     if video is None:
@@ -624,7 +626,10 @@ def append_review_action(
         inverse_of_action_id=inverse_of,
     )
     session.add(action)
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
 
     result = deepcopy(snapshot)
     _apply_state_payload(result, action.after_state)
