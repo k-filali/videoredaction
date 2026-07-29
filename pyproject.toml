@@ -38,6 +38,7 @@ dev = [
 
 [project.scripts]
 clearframe-api = "clearframe.main:run"
+clearframe-reconcile = "clearframe.reconcile:run"
 clearframe-worker = "clearframe.worker:run"
 
 [tool.hatch.build.targets.wheel]

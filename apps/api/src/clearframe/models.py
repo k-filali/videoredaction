@@ -247,7 +247,11 @@ class ExportArtifact(Base):
 
 class ProcessingJob(Base):
     __tablename__ = "processing_jobs"
-    __table_args__ = (Index("ix_processing_jobs_video_status", "video_id", "status"),)
+    __table_args__ = (
+        Index("ix_processing_jobs_video_status", "video_id", "status"),
+        Index("ix_processing_jobs_status_created", "status", "created_at"),
+        Index("ix_processing_jobs_status_lease", "status", "lease_expires_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     video_id: Mapped[str | None] = mapped_column(
@@ -266,6 +270,8 @@ class ProcessingJob(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
