@@ -30,8 +30,8 @@ def _weighted_model(weight_path: str | None, sha256: str | None) -> dict[str, ob
         "model_version": "1.0.0",
         "adapter_version": "1.0.0",
         "enabled": True,
-        "deployment_allowed": False,
-        "research_only": True,
+        "deployment_allowed": True,
+        "research_only": False,
         "supported_classes": ["license_plate"],
         "thresholds": {
             "confidence": 0.5,
@@ -124,6 +124,24 @@ def test_registry_rejects_remote_weights_and_unknown_fields(tmp_path: Path) -> N
     unknown_path = _write_registry(tmp_path / "unknown.yaml", unknown)
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         load_model_registry(unknown_path)
+
+
+@pytest.mark.parametrize(
+    ("deployment_allowed", "research_only"),
+    [(False, False), (False, True)],
+)
+def test_enabled_models_require_deployment_approval(
+    tmp_path: Path,
+    deployment_allowed: bool,
+    research_only: bool,
+) -> None:
+    model = _weighted_model("model.onnx", "0" * 64)
+    model["deployment_allowed"] = deployment_allowed
+    model["research_only"] = research_only
+    registry_path = _write_registry(tmp_path / "registry.yaml", model)
+
+    with pytest.raises(ValidationError, match="approved for deployment"):
+        load_model_registry(registry_path)
 
 
 def test_disabled_future_slot_must_be_complete_before_enablement(tmp_path: Path) -> None:

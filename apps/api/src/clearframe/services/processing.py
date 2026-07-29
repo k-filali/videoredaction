@@ -249,7 +249,11 @@ class ProcessingService:
             return run
 
     def _select_bindings(self, requested_ids: list[str] | None) -> tuple[_DetectorBinding, ...]:
-        enabled = {entry.id: entry for entry in self.registry.enabled_models}
+        enabled = {
+            entry.id: entry
+            for entry in self.registry.enabled_models
+            if entry.deployment_allowed and not entry.research_only
+        }
         if requested_ids is None:
             selected_ids = sorted(enabled)
         else:

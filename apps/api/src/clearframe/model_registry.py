@@ -110,6 +110,8 @@ class ModelEntry(StrictModel):
             raise ValueError("non-mock models must declare a weight source")
 
         if self.enabled:
+            if not self.deployment_allowed or self.research_only:
+                raise ValueError("enabled models must be approved for deployment")
             if self.license is None:
                 raise ValueError("enabled models require an explicit license")
             if self.weights.source is not WeightSource.NONE:
