@@ -13,6 +13,7 @@ from clearframe.api.videos import router as videos_router
 from clearframe.config import Settings, get_settings
 from clearframe.database import Database
 from clearframe.middleware import AccessTokenMiddleware, UploadLimitMiddleware
+from clearframe.observability import RequestTraceMiddleware, configure_observability
 from clearframe.services.container import ServiceContainer
 
 
@@ -35,6 +36,7 @@ def create_app(
     services: ServiceContainer | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
+    configure_observability(resolved_settings.log_level)
     resolved_database = database or Database(resolved_settings.database_url)
     resolved_services = services or ServiceContainer.build(
         resolved_settings,
@@ -68,6 +70,7 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(RequestTraceMiddleware)
     app.include_router(videos_router)
     app.include_router(review_router)
     app.include_router(exports_router)

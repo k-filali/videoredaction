@@ -33,6 +33,19 @@ def test_access_token_protects_sensitive_api(tmp_path: Path) -> None:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 health = await client.get("/api/health")
                 assert health.status_code == 200
+                assert len(health.headers["x-request-id"]) == 32
+
+                traced = await client.get(
+                    "/api/health",
+                    headers={"X-Request-ID": "test-request-1234"},
+                )
+                assert traced.headers["x-request-id"] == "test-request-1234"
+
+                sanitized = await client.get(
+                    "/api/health",
+                    headers={"X-Request-ID": "../../unsafe"},
+                )
+                assert sanitized.headers["x-request-id"] != "../../unsafe"
 
                 unauthorized = await client.get("/api/videos")
                 assert unauthorized.status_code == 401
@@ -46,4 +59,3 @@ def test_access_token_protects_sensitive_api(tmp_path: Path) -> None:
                 assert authorized.json() == {"items": [], "total": 0}
 
     asyncio.run(exercise())
-
