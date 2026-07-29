@@ -32,7 +32,7 @@ def proposal(
     )
 
 
-def test_mock_detector_is_deterministic_and_finds_demo_plate() -> None:
+def test_mock_detector_is_deterministic_and_finds_plate_shape() -> None:
     frame = np.full((360, 640, 3), (58, 35, 23), dtype=np.uint8)
     frame[220:274, 160:340] = 255
     frame[232:262, 172:328] = 255

@@ -146,7 +146,7 @@ class MockPlateDetector:
                 confidence=0.99,
                 detector_name=self.name,
                 detector_version=self.version,
-                attributes={"synthetic": True},
+                attributes={"deterministic": True},
             )
         ]
 

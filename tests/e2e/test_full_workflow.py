@@ -22,7 +22,7 @@ def test_upload_detect_review_export_workflow(tmp_path: Path) -> None:
     )
     services = ServiceContainer.build(settings, database)
     app = create_app(settings=settings, database=database, services=services)
-    source = generate_test_video(tmp_path / "synthetic-evidence.mp4", services.media)
+    source = generate_test_video(tmp_path / "test-evidence.mp4", services.media)
     original_hash = sha256_file(source)
 
     async def exercise() -> None:
@@ -37,7 +37,7 @@ def test_upload_detect_review_export_workflow(tmp_path: Path) -> None:
                     "/api/videos",
                     files={
                         "file": (
-                            "synthetic-evidence.mp4",
+                            "test-evidence.mp4",
                             source.read_bytes(),
                             "video/mp4",
                         )
@@ -148,7 +148,7 @@ def test_upload_detect_review_export_workflow(tmp_path: Path) -> None:
                         "bbox": {"x1": 0.05, "y1": 0.1, "x2": 0.15, "y2": 0.2},
                         "end_frame": 17,
                         "end_ms": 1133,
-                        "reason_code": "demo_missed_region",
+                        "reason_code": "missed_region",
                     },
                 )
                 assert manual.status_code == 201
@@ -165,7 +165,7 @@ def test_upload_detect_review_export_workflow(tmp_path: Path) -> None:
                     json={
                         "action_type": "RESTORE_TRACK",
                         "expected_revision": state["revision"],
-                        "reason_code": "demo_false_positive",
+                        "reason_code": "false_positive",
                     },
                 )
                 assert restored.status_code == 200

@@ -44,7 +44,7 @@ def request_export(
     video_id: str,
     request: ExportCreate,
     services: ServicesDependency,
-    reviewer_session: ReviewerSession = "local-demo",
+    reviewer_session: ReviewerSession = "local-reviewer",
 ) -> ExportAccepted:
     try:
         requested = services.export.request(

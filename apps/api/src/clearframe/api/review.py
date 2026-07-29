@@ -143,7 +143,7 @@ def update_track(
     track_id: str,
     command: ReviewCommand,
     services: ServicesDependency,
-    reviewer_session: ReviewerSession = "local-demo",
+    reviewer_session: ReviewerSession = "local-reviewer",
 ) -> ReviewMutationRead:
     if command.action_type in {
         ReviewActionType.CREATE_MANUAL_REGION,
@@ -169,7 +169,7 @@ def create_manual_region(
     video_id: str,
     region: ManualRegionCreate,
     services: ServicesDependency,
-    reviewer_session: ReviewerSession = "local-demo",
+    reviewer_session: ReviewerSession = "local-reviewer",
 ) -> ReviewMutationRead:
     payload = {
         "class_name": region.class_name,
@@ -201,7 +201,7 @@ def create_review_action(
     video_id: str,
     command: ReviewCommand,
     services: ServicesDependency,
-    reviewer_session: ReviewerSession = "local-demo",
+    reviewer_session: ReviewerSession = "local-reviewer",
 ) -> ReviewMutationRead:
     return _append(services, video_id, command, reviewer_session)
 
@@ -236,7 +236,7 @@ def accept_reprocessing_suggestion(
     suggestion_id: str,
     resolution: ReprocessingSuggestionResolution,
     services: ServicesDependency,
-    reviewer_session: ReviewerSession = "local-demo",
+    reviewer_session: ReviewerSession = "local-reviewer",
 ) -> ReprocessingSuggestionResolutionRead:
     try:
         result = services.reprocess.accept_suggestion(
@@ -272,7 +272,7 @@ def dismiss_reprocessing_suggestion(
     suggestion_id: str,
     resolution: ReprocessingSuggestionResolution,
     services: ServicesDependency,
-    reviewer_session: ReviewerSession = "local-demo",
+    reviewer_session: ReviewerSession = "local-reviewer",
 ) -> ReprocessingSuggestionResolutionRead:
     try:
         result = services.reprocess.dismiss_suggestion(
