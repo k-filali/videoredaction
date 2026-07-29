@@ -14,7 +14,9 @@ from clearframe.database import Database
 from clearframe.domain.enums import (
     ExportStatus,
     JobStatus,
+    JobType,
     RedactionStyle,
+    ReprocessingSuggestionStatus,
     ReviewActionType,
     TrackSource,
     VideoStatus,
@@ -24,6 +26,7 @@ from clearframe.media import sha256_file
 from clearframe.models import (
     ExportArtifact,
     ProcessingJob,
+    ReprocessingSuggestion,
     ReviewAction,
     Track,
     TrackKeyframe,
@@ -237,3 +240,61 @@ def test_unresolved_proposal_rejects_export(
         assert artifacts == []
         assert export_jobs == []
         assert sha256_file(services.storage.path_for(video.original_uri)) == original_sha256
+
+
+def test_pending_context_suggestion_rejects_export(
+    export_environment: tuple[Database, ServiceContainer, str, str, str],
+) -> None:
+    database, services, video_id, track_id, _ = export_environment
+
+    with database.session() as session:
+        action, _ = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.ACCEPT_PROPOSAL,
+                expected_revision=0,
+                track_id=track_id,
+            ),
+            reviewer_session_id="reviewer-export-test",
+        )
+        job = ProcessingJob(
+            video_id=video_id,
+            job_type=JobType.REPROCESS,
+            status=JobStatus.COMPLETED,
+        )
+        session.add(job)
+        session.flush()
+        session.add(
+            ReprocessingSuggestion(
+                video_id=video_id,
+                source_action_id=action.id,
+                job_id=job.id,
+                track_id=track_id,
+                source_revision=1,
+                class_name="license_plate",
+                seed_frame_index=0,
+                frame_index=1,
+                timestamp_ms=67,
+                x1=0.25,
+                y1=0.61,
+                x2=0.53,
+                y2=0.76,
+                confidence=0.93,
+                direction="forward",
+                propagation_method="interpolation",
+                status=ReprocessingSuggestionStatus.PENDING,
+            )
+        )
+        session.commit()
+
+    with pytest.raises(
+        ExportValidationError,
+        match=r"context suggestion.*still require reviewer confirmation",
+    ):
+        services.export.request(
+            video_id,
+            expected_revision=1,
+            style=RedactionStyle.BLACK_BOX,
+            reviewer_session_id="reviewer-export-test",
+        )

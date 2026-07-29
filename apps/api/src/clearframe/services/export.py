@@ -16,6 +16,7 @@ from clearframe.domain.enums import (
     ExportStatus,
     JobType,
     RedactionStyle,
+    ReprocessingSuggestionStatus,
     ReviewActionType,
     VideoStatus,
 )
@@ -26,6 +27,7 @@ from clearframe.models import (
     ExportArtifact,
     ModelRun,
     ProcessingJob,
+    ReprocessingSuggestion,
     ReviewAction,
     VideoAsset,
     new_id,
@@ -117,6 +119,17 @@ class ExportService:
                 expected_revision,
             )
             self._validate_snapshot(snapshot)
+            pending_context = session.scalar(
+                select(func.count(ReprocessingSuggestion.id)).where(
+                    ReprocessingSuggestion.video_id == video_id,
+                    ReprocessingSuggestion.status
+                    == ReprocessingSuggestionStatus.PENDING,
+                )
+            )
+            if pending_context:
+                raise ExportValidationError(
+                    f"{pending_context} context suggestion(s) still require reviewer confirmation"
+                )
 
             export_id = new_id()
             artifact = ExportArtifact(
