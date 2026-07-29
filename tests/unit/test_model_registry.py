@@ -9,8 +9,10 @@ from pydantic import ValidationError
 
 from clearframe.model_registry import (
     DEFAULT_REGISTRY_PATH,
+    AdapterKind,
     ModelRegistryError,
     load_model_registry,
+    resolve_weight_path,
 )
 
 
@@ -51,14 +53,23 @@ def _weighted_model(weight_path: str | None, sha256: str | None) -> dict[str, ob
     }
 
 
-def test_default_registry_is_fail_closed_and_fingerprinted() -> None:
+def test_default_registry_enables_verified_real_detectors() -> None:
     registry = load_model_registry()
 
     assert DEFAULT_REGISTRY_PATH.is_file()
-    assert [model.id for model in registry.enabled_models] == ["mock-plate-v1"]
+    assert [model.id for model in registry.enabled_models] == [
+        "yolov9t-plate",
+        "yunet-face",
+    ]
+    assert all(
+        model.adapter is not AdapterKind.DETERMINISTIC_MOCK
+        for model in registry.models
+    )
+    assert all(
+        (path := resolve_weight_path(model)) is not None and path.is_file()
+        for model in registry.enabled_models
+    )
     assert len(registry.config_fingerprint) == 64
-    assert registry.get("opencv-haar-face").enabled is False
-    assert registry.get("yunet-face-local").weights.path is None
 
 
 def test_fingerprint_is_semantic_and_independent_of_model_order(tmp_path: Path) -> None:
@@ -69,8 +80,12 @@ def test_fingerprint_is_semantic_and_independent_of_model_order(tmp_path: Path) 
     source["models"].reverse()
     second.write_text(yaml.safe_dump(source, sort_keys=True), encoding="utf-8")
 
-    assert load_model_registry(first).config_fingerprint == load_model_registry(
-        second
+    assert load_model_registry(
+        first,
+        verify_enabled_weights=False,
+    ).config_fingerprint == load_model_registry(
+        second,
+        verify_enabled_weights=False,
     ).config_fingerprint
 
 

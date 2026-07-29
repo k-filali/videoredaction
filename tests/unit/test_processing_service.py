@@ -16,6 +16,8 @@ from clearframe.pipeline import (
     DetectionProposal,
     Detector,
     DetectorAvailability,
+    OnnxRuntimeYoloV9PlateDetector,
+    OpenCVYuNetFaceDetector,
 )
 from clearframe.pipeline.detection import Frame
 from clearframe.services.processing import (
@@ -87,6 +89,11 @@ def test_mock_processing_persists_run_detections_and_tracks(tmp_path: Path) -> N
             assert run.metrics["frames_sampled"] > 0
             assert run.metrics["detections"] > 0
             assert run.metrics["tracks"] == 1
+            track = session.scalar(
+                select(Track).where(Track.model_run_id == run.id)
+            )
+            assert track is not None
+            assert track.end_frame == run.metrics["frames_decoded"] - 1
             assert session.scalar(
                 select(func.count(Detection.id)).where(Detection.model_run_id == run.id)
             ) == run.metrics["detections"]
@@ -104,6 +111,23 @@ def test_processing_rejects_disabled_detector_selection(tmp_path: Path) -> None:
     try:
         with pytest.raises(DetectorSelectionError, match="disabled"):
             service.request(video_id, model_ids=["unavailable-model"])
+    finally:
+        runner.shutdown()
+
+
+def test_default_processing_loads_real_model_adapters(tmp_path: Path) -> None:
+    database, storage, runner, _, _ = _build_processing(tmp_path)
+    service = ProcessingService(database, storage, runner)
+    try:
+        bindings = service._select_bindings(None)
+
+        assert [binding.entry.id for binding in bindings] == [
+            "yolov9t-plate",
+            "yunet-face",
+        ]
+        assert isinstance(bindings[0].detector, OnnxRuntimeYoloV9PlateDetector)
+        assert isinstance(bindings[1].detector, OpenCVYuNetFaceDetector)
+        assert all(binding.detector.availability.available for binding in bindings)
     finally:
         runner.shutdown()
 

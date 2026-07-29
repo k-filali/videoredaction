@@ -1,9 +1,9 @@
 schema_version: 1
 models:
-  - id: mock-plate-v1
-    display_name: Deterministic mock plate detector
-    adapter: deterministic_mock
-    model_version: "1.0.0"
+  - id: yolov9t-plate
+    display_name: YOLOv9-t licence plate detector
+    adapter: onnxruntime_yolov9
+    model_version: "open-image-models-384-end2end"
     adapter_version: "1.0.0"
     enabled: true
     deployment_allowed: true
@@ -11,100 +11,37 @@ models:
     supported_classes:
       - license_plate
     thresholds:
-      confidence: 0.99
-      nms_iou: 0.40
-      min_size_pixels: 24
-    weights:
-      source: none
-      path: null
-      sha256: null
-    license:
-      spdx_id: LicenseRef-ClearFrame-Project
-      name: ClearFrame project code; no model weights
-      url: null
-
-  - id: opencv-haar-face
-    display_name: OpenCV frontal face Haar cascade
-    adapter: opencv_cascade
-    model_version: "opencv-4.x-haarcascade_frontalface_default"
-    adapter_version: "1.0.0"
-    enabled: false
-    deployment_allowed: true
-    research_only: false
-    supported_classes:
-      - face
-    thresholds:
-      confidence: 0.50
-      nms_iou: 0.35
-      min_size_pixels: 24
-    weights:
-      source: opencv_data
-      path: haarcascade_frontalface_default.xml
-      sha256: null
-    license:
-      spdx_id: Apache-2.0
-      name: Apache License 2.0
-      url: https://github.com/opencv/opencv/blob/4.x/LICENSE
-
-  - id: opencv-haar-russian-plate
-    display_name: OpenCV Russian plate Haar cascade
-    adapter: opencv_cascade
-    model_version: "opencv-4.x-haarcascade_russian_plate_number"
-    adapter_version: "1.0.0"
-    enabled: false
-    deployment_allowed: true
-    research_only: false
-    supported_classes:
-      - license_plate
-    thresholds:
-      confidence: 0.50
-      nms_iou: 0.40
-      min_size_pixels: 24
-    weights:
-      source: opencv_data
-      path: haarcascade_russian_plate_number.xml
-      sha256: null
-    license:
-      spdx_id: Apache-2.0
-      name: Apache License 2.0
-      url: https://github.com/opencv/opencv/blob/4.x/LICENSE
-
-  - id: yunet-face-local
-    display_name: YuNet face detector local slot
-    adapter: opencv_yunet
-    model_version: unconfigured
-    adapter_version: "1.0.0"
-    enabled: false
-    deployment_allowed: false
-    research_only: true
-    supported_classes:
-      - face
-    thresholds:
-      confidence: 0.90
-      nms_iou: 0.30
-      min_size_pixels: 20
+      confidence: 0.30
+      nms_iou: 0.45
+      min_size_pixels: 8
     weights:
       source: local
-      path: null
-      sha256: null
-    license: null
+      path: weights/license_plate_detection_yolov9t_384.onnx
+      sha256: 888397b96d761c89db40bc9c305838e8652660f5e282c2cadebbe8d2951a77a8
+    license:
+      spdx_id: MIT
+      name: MIT License
+      url: https://github.com/ankandrew/open-image-models/blob/main/LICENSE
 
-  - id: onnx-plate-local
-    display_name: ONNX plate detector local slot
-    adapter: onnx
-    model_version: unconfigured
+  - id: yunet-face
+    display_name: OpenCV YuNet face detector
+    adapter: opencv_yunet
+    model_version: "2023mar-3cc26e7f"
     adapter_version: "1.0.0"
-    enabled: false
-    deployment_allowed: false
-    research_only: true
+    enabled: true
+    deployment_allowed: true
+    research_only: false
     supported_classes:
-      - license_plate
+      - face
     thresholds:
-      confidence: 0.50
-      nms_iou: 0.45
+      confidence: 0.60
+      nms_iou: 0.30
       min_size_pixels: 16
     weights:
       source: local
-      path: null
-      sha256: null
-    license: null
+      path: weights/face_detection_yunet_2023mar.onnx
+      sha256: 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
+    license:
+      spdx_id: MIT
+      name: MIT License
+      url: https://huggingface.co/opencv/face_detection_yunet/blob/3cc26e7f1014a5ee5d74a42acee58bafc9d0a310/LICENSE

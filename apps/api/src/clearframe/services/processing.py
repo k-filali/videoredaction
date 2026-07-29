@@ -48,8 +48,11 @@ from clearframe.pipeline import (
     Detector,
     IoUTracker,
     MockPlateDetector,
+    OnnxRuntimeYoloV9PlateDetector,
     OpenCVFaceCascadeDetector,
     OpenCVPlateCascadeDetector,
+    OpenCVYoloV8PlateDetector,
+    OpenCVYuNetFaceDetector,
     class_aware_nms,
 )
 from clearframe.pipeline.detection import Frame
@@ -287,19 +290,57 @@ class ProcessingService:
     def _build_detector(self, entry: ModelEntry) -> Detector:
         if entry.adapter is AdapterKind.DETERMINISTIC_MOCK:
             return MockPlateDetector()
-        if entry.adapter is not AdapterKind.OPENCV_CASCADE:
-            raise DetectorSelectionError(f"{entry.id}: adapter is not implemented")
 
-        cascade_path = resolve_weight_path(
+        model_path = resolve_weight_path(
             entry,
             registry_path=self.registry_path,
             weights_root=self.weights_root,
         )
+        if model_path is None:
+            raise DetectorSelectionError(f"{entry.id}: model weights are not configured")
+
         classes = set(entry.supported_classes)
+        if entry.adapter is AdapterKind.OPENCV_YUNET:
+            if classes == {DetectorClass.FACE}:
+                return OpenCVYuNetFaceDetector(
+                    model_path,
+                    confidence_threshold=entry.thresholds.confidence,
+                    nms_threshold=entry.thresholds.nms_iou,
+                    min_face_size_pixels=entry.thresholds.min_size_pixels,
+                )
+            raise DetectorSelectionError(
+                f"{entry.id}: YuNet adapter must support exactly one known class"
+            )
+
+        if entry.adapter is AdapterKind.ONNXRUNTIME_YOLOV9:
+            if classes == {DetectorClass.LICENSE_PLATE}:
+                return OnnxRuntimeYoloV9PlateDetector(
+                    model_path,
+                    confidence_threshold=entry.thresholds.confidence,
+                    min_plate_size_pixels=entry.thresholds.min_size_pixels,
+                )
+            raise DetectorSelectionError(
+                f"{entry.id}: YOLOv9 adapter must support exactly one known class"
+            )
+
+        if entry.adapter is AdapterKind.OPENCV_YOLOV8:
+            if classes == {DetectorClass.LICENSE_PLATE}:
+                return OpenCVYoloV8PlateDetector(
+                    model_path,
+                    confidence_threshold=entry.thresholds.confidence,
+                    nms_threshold=entry.thresholds.nms_iou,
+                    min_plate_size_pixels=entry.thresholds.min_size_pixels,
+                )
+            raise DetectorSelectionError(
+                f"{entry.id}: YOLOv8 adapter must support exactly one known class"
+            )
+
+        if entry.adapter is not AdapterKind.OPENCV_CASCADE:
+            raise DetectorSelectionError(f"{entry.id}: adapter is not implemented")
         if classes == {DetectorClass.FACE}:
-            return OpenCVFaceCascadeDetector(cascade_path)
+            return OpenCVFaceCascadeDetector(model_path)
         if classes == {DetectorClass.LICENSE_PLATE}:
-            return OpenCVPlateCascadeDetector(cascade_path)
+            return OpenCVPlateCascadeDetector(model_path)
         raise DetectorSelectionError(
             f"{entry.id}: OpenCV cascade must support exactly one known class"
         )
@@ -371,7 +412,15 @@ class ProcessingService:
         inference_totals: dict[str, float] = defaultdict(float)
         frames_decoded = 0
         frames_sampled = 0
-        nms_threshold = min(binding.entry.thresholds.nms_iou for binding in bindings)
+        nms_thresholds = {
+            class_name.value: min(
+                binding.entry.thresholds.nms_iou
+                for binding in bindings
+                if class_name in binding.entry.supported_classes
+            )
+            for class_name in DetectorClass
+            if any(class_name in binding.entry.supported_classes for binding in bindings)
+        }
 
         try:
             while True:
@@ -380,7 +429,11 @@ class ProcessingService:
                     break
                 frame_index = frames_decoded
                 frames_decoded += 1
-                if frame_index % sample_every_frames != 0:
+                is_tail_frame = frame_index >= max(
+                    0,
+                    estimated_frames - sample_every_frames,
+                )
+                if frame_index % sample_every_frames != 0 and not is_tail_frame:
                     continue
 
                 frames_sampled += 1
@@ -420,13 +473,21 @@ class ProcessingService:
                             )
                         )
 
-                kept = {
-                    id(proposal)
-                    for proposal in class_aware_nms(
-                        (item.proposal for item in frame_observations),
-                        iou_threshold=nms_threshold,
+                kept: set[int] = set()
+                for class_name in sorted(
+                    {item.proposal.class_name for item in frame_observations}
+                ):
+                    kept.update(
+                        id(proposal)
+                        for proposal in class_aware_nms(
+                            (
+                                item.proposal
+                                for item in frame_observations
+                                if item.proposal.class_name == class_name
+                            ),
+                            iou_threshold=nms_thresholds[class_name],
+                        )
                     )
-                }
                 observations.extend(
                     _ObservedDetection(
                         proposal=item.proposal,
