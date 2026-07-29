@@ -6,7 +6,7 @@ from threading import Lock
 from sqlalchemy import select
 
 from clearframe.database import Database
-from clearframe.domain.enums import ExportStatus, JobStatus, VideoStatus
+from clearframe.domain.enums import ExportStatus, JobStatus, JobType, VideoStatus
 from clearframe.models import ExportArtifact, ProcessingJob, VideoAsset
 
 
@@ -59,7 +59,11 @@ class LocalJobRunner:
                 if job.video_id:
                     video = session.get(VideoAsset, job.video_id)
                     if video is not None:
-                        video.status = VideoStatus.FAILED
+                        video.status = (
+                            VideoStatus.READY_FOR_REVIEW
+                            if job.job_type == JobType.EXPORT
+                            else VideoStatus.FAILED
+                        )
                         video.error_message = job.error_message
                 if job.export_id:
                     export = session.get(ExportArtifact, job.export_id)
@@ -117,7 +121,11 @@ class LocalJobRunner:
             if job.video_id:
                 video = session.get(VideoAsset, job.video_id)
                 if video is not None:
-                    video.status = VideoStatus.FAILED
+                    video.status = (
+                        VideoStatus.READY_FOR_REVIEW
+                        if job.job_type == JobType.EXPORT
+                        else VideoStatus.FAILED
+                    )
                     video.error_message = job.error_message
             if job.export_id:
                 export = session.get(ExportArtifact, job.export_id)

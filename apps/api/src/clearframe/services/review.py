@@ -55,7 +55,12 @@ def _apply_state_payload(snapshot: ReviewSnapshot, payload: dict[str, Any]) -> N
         snapshot.tracks[state.track_id] = state
 
 
-def build_review_snapshot(session: Session, video_id: str) -> ReviewSnapshot:
+def build_review_snapshot(
+    session: Session,
+    video_id: str,
+    *,
+    through_revision: int | None = None,
+) -> ReviewSnapshot:
     video = session.get(VideoAsset, video_id)
     if video is None:
         raise VideoNotFoundError(video_id)
@@ -104,16 +109,23 @@ def build_review_snapshot(session: Session, video_id: str) -> ReviewSnapshot:
             keyframes=grouped_keyframes.get(track.id, []),
         )
 
-    actions = session.scalars(
-        select(ReviewAction)
-        .where(ReviewAction.video_id == video_id)
-        .order_by(ReviewAction.revision)
-    )
+    actions_query = select(ReviewAction).where(ReviewAction.video_id == video_id)
+    if through_revision is not None:
+        actions_query = actions_query.where(ReviewAction.revision <= through_revision)
+    actions = session.scalars(actions_query.order_by(ReviewAction.revision))
     for action in actions:
         _apply_state_payload(snapshot, action.after_state)
         snapshot.revision = action.revision
 
     return snapshot
+
+
+def build_review_snapshot_at_revision(
+    session: Session,
+    video_id: str,
+    revision: int,
+) -> ReviewSnapshot:
+    return build_review_snapshot(session, video_id, through_revision=revision)
 
 
 def _required_target(snapshot: ReviewSnapshot, track_id: str | None) -> TrackReviewState:
@@ -382,3 +394,55 @@ def append_review_action(
     _apply_state_payload(result, action.after_state)
     result.revision = next_revision
     return action, result
+
+
+def append_system_audit_event(
+    session: Session,
+    video_id: str,
+    action_type: ReviewActionType,
+    payload: dict[str, Any],
+    *,
+    reviewer_session_id: str,
+) -> ReviewAction:
+    if action_type not in {
+        ReviewActionType.EXPORT_REQUESTED,
+        ReviewActionType.EXPORT_COMPLETED,
+    }:
+        raise ReviewError("unsupported system audit event")
+    video = session.get(VideoAsset, video_id)
+    if video is None:
+        raise VideoNotFoundError(video_id)
+    current_revision = video.review_revision
+    next_revision = current_revision + 1
+    reservation = cast(
+        CursorResult[Any],
+        session.execute(
+            update(VideoAsset)
+            .where(
+                VideoAsset.id == video_id,
+                VideoAsset.review_revision == current_revision,
+            )
+            .values(review_revision=next_revision)
+            .execution_options(synchronize_session=False)
+        ),
+    )
+    if reservation.rowcount != 1:
+        session.rollback()
+        actual = session.scalar(
+            select(VideoAsset.review_revision).where(VideoAsset.id == video_id)
+        )
+        raise RevisionConflictError(current_revision, actual if actual is not None else 0)
+
+    action = ReviewAction(
+        video_id=video_id,
+        action_type=action_type,
+        before_state={"tracks": [], "removed_track_ids": []},
+        after_state={"tracks": [], "removed_track_ids": [], **payload},
+        reviewer_session_id=reviewer_session_id,
+        revision=next_revision,
+        model_version=video.active_model_run_id,
+        application_version=__version__,
+    )
+    session.add(action)
+    session.flush()
+    return action

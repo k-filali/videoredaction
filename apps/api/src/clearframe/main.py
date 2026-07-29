@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from clearframe import __version__
+from clearframe.api.exports import router as exports_router
 from clearframe.api.review import router as review_router
 from clearframe.api.videos import router as videos_router
 from clearframe.config import Settings, get_settings
@@ -69,6 +70,7 @@ def create_app(
     )
     app.include_router(videos_router)
     app.include_router(review_router)
+    app.include_router(exports_router)
 
     @app.get("/api/health", tags=["system"])
     async def health() -> dict[str, str]:

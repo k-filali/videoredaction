@@ -3,10 +3,17 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from clearframe.domain.enums import JobStatus, JobType, ReviewActionType, VideoStatus
+from clearframe.domain.enums import (
+    ExportStatus,
+    JobStatus,
+    JobType,
+    RedactionStyle,
+    ReviewActionType,
+    VideoStatus,
+)
 from clearframe.domain.geometry import NormalizedBox
 from clearframe.domain.review import ReviewSnapshot
-from clearframe.models import ProcessingJob, ReviewAction, VideoAsset
+from clearframe.models import ExportArtifact, ProcessingJob, ReviewAction, VideoAsset
 
 
 class VideoRead(BaseModel):
@@ -157,3 +164,48 @@ class AuditLogRead(BaseModel):
     revision: int
     actions: list[AuditActionRead]
 
+
+class ExportCreate(BaseModel):
+    expected_revision: int = Field(ge=0)
+    redaction_style: RedactionStyle = RedactionStyle.PIXELATE
+
+
+class ExportRead(BaseModel):
+    id: str
+    video_id: str
+    status: ExportStatus
+    redaction_style: RedactionStyle
+    source_model_run_id: str | None
+    review_revision: int
+    export_sha256: str | None
+    download_url: str | None
+    manifest_url: str | None
+    error_message: str | None
+    created_at: datetime
+    completed_at: datetime | None
+
+    @classmethod
+    def from_model(cls, artifact: ExportArtifact) -> "ExportRead":
+        return cls(
+            id=artifact.id,
+            video_id=artifact.video_id,
+            status=ExportStatus(artifact.status),
+            redaction_style=RedactionStyle(artifact.redaction_style),
+            source_model_run_id=artifact.source_model_run_id,
+            review_revision=artifact.review_revision,
+            export_sha256=artifact.export_sha256,
+            download_url=(
+                f"/api/exports/{artifact.id}/download" if artifact.export_uri else None
+            ),
+            manifest_url=(
+                f"/api/exports/{artifact.id}/manifest" if artifact.manifest_uri else None
+            ),
+            error_message=artifact.error_message,
+            created_at=artifact.created_at,
+            completed_at=artifact.completed_at,
+        )
+
+
+class ExportAccepted(BaseModel):
+    export: ExportRead
+    job: JobRead

@@ -85,3 +85,11 @@ class LocalStorage:
     @staticmethod
     def thumbnail_uri(video_id: str) -> str:
         return f"thumbnails/{video_id}/poster.jpg"
+
+    @staticmethod
+    def export_video_uri(video_id: str, export_id: str) -> str:
+        return f"exports/{video_id}/{export_id}/redacted.mp4"
+
+    @staticmethod
+    def export_manifest_uri(video_id: str, export_id: str) -> str:
+        return f"exports/{video_id}/{export_id}/manifest.json"

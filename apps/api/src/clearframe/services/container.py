@@ -4,6 +4,7 @@ from clearframe.config import Settings
 from clearframe.database import Database
 from clearframe.jobs import LocalJobRunner
 from clearframe.media import MediaProcessor
+from clearframe.services.export import ExportService
 from clearframe.services.ingest import IngestService
 from clearframe.storage import LocalStorage
 
@@ -14,6 +15,7 @@ class ServiceContainer:
     media: MediaProcessor
     runner: LocalJobRunner
     ingest: IngestService
+    export: ExportService
 
     @classmethod
     def build(cls, settings: Settings, database: Database) -> "ServiceContainer":
@@ -27,5 +29,16 @@ class ServiceContainer:
             runner=runner,
             max_upload_mb=settings.max_upload_mb,
         )
-        return cls(storage=storage, media=media, runner=runner, ingest=ingest)
-
+        export = ExportService(
+            database=database,
+            storage=storage,
+            media=media,
+            runner=runner,
+        )
+        return cls(
+            storage=storage,
+            media=media,
+            runner=runner,
+            ingest=ingest,
+            export=export,
+        )
