@@ -1,0 +1,314 @@
+from copy import deepcopy
+from pathlib import Path
+
+import pytest
+from sqlalchemy import select
+from tests.helpers import generate_test_video
+
+from clearframe.database import Database
+from clearframe.domain.enums import (
+    InterpolationMode,
+    JobStatus,
+    JobType,
+    ReviewActionType,
+    TrackSource,
+    TrackStatus,
+    VideoStatus,
+)
+from clearframe.domain.review import ReviewCommand
+from clearframe.jobs import LocalJobRunner
+from clearframe.media import MediaProcessor
+from clearframe.models import (
+    ProcessingJob,
+    ReprocessingSuggestion,
+    ReviewAction,
+    Track,
+    TrackKeyframe,
+    VideoAsset,
+)
+from clearframe.services.reprocessing import (
+    ReprocessingConflictError,
+    ReprocessingService,
+)
+from clearframe.services.review import append_review_action
+from clearframe.storage import LocalStorage
+
+
+def _build_context(
+    tmp_path: Path,
+) -> tuple[Database, LocalStorage, LocalJobRunner, str, float]:
+    database = Database(f"sqlite:///{(tmp_path / 'reprocessing.db').as_posix()}")
+    database.create_schema()
+    storage = LocalStorage(tmp_path / "storage")
+    runner = LocalJobRunner(database, max_workers=1)
+    media = MediaProcessor()
+    video_id = "reprocessing-video"
+    proxy_uri = storage.proxy_uri(video_id)
+    proxy_path = generate_test_video(
+        storage.prepare(proxy_uri),
+        media,
+        duration_seconds=1.2,
+        audio=False,
+    )
+    metadata = media.probe(proxy_path)
+    with database.session() as session:
+        session.add(
+            VideoAsset(
+                id=video_id,
+                original_filename="sample.mp4",
+                safe_filename="sample.mp4",
+                content_type="video/mp4",
+                duration_ms=metadata.duration_ms,
+                fps=metadata.fps,
+                width=metadata.width,
+                height=metadata.height,
+                proxy_uri=proxy_uri,
+                status=VideoStatus.READY_FOR_REVIEW,
+            )
+        )
+        session.commit()
+    return database, storage, runner, video_id, metadata.fps
+
+
+def _create_corrected_action(database: Database, video_id: str, fps: float) -> ReviewAction:
+    track_id = "proposal-track"
+    with database.session() as session:
+        session.add(
+            Track(
+                id=track_id,
+                video_id=video_id,
+                class_name="license_plate",
+                start_frame=0,
+                end_frame=14,
+                start_ms=0,
+                end_ms=round(14 * 1000 / fps),
+                status=TrackStatus.PROPOSED,
+                default_redacted=True,
+                source=TrackSource.MODEL,
+                confidence_summary={"mean": 0.8},
+            )
+        )
+        session.add_all(
+            [
+                TrackKeyframe(
+                    track_id=track_id,
+                    frame_index=0,
+                    timestamp_ms=0,
+                    x1=0.20,
+                    y1=0.60,
+                    x2=0.50,
+                    y2=0.75,
+                    interpolation_mode=InterpolationMode.LINEAR,
+                    source=TrackSource.MODEL,
+                    locked=False,
+                ),
+                TrackKeyframe(
+                    track_id=track_id,
+                    frame_index=14,
+                    timestamp_ms=round(14 * 1000 / fps),
+                    x1=0.24,
+                    y1=0.60,
+                    x2=0.54,
+                    y2=0.75,
+                    interpolation_mode=InterpolationMode.LINEAR,
+                    source=TrackSource.MODEL,
+                    locked=False,
+                ),
+            ]
+        )
+        session.commit()
+
+    with database.session() as session:
+        action, _ = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.MOVE_REGION,
+                expected_revision=0,
+                track_id=track_id,
+                frame_index=7,
+                timestamp_ms=round(7 * 1000 / fps),
+                payload={
+                    "bbox": {
+                        "x1": 0.30,
+                        "y1": 0.58,
+                        "x2": 0.60,
+                        "y2": 0.73,
+                    }
+                },
+            ),
+            reviewer_session_id="reviewer-test",
+        )
+        return action
+
+
+def test_reprocessing_persists_bounded_suggestions_without_mutating_truth(
+    tmp_path: Path,
+) -> None:
+    database, storage, runner, video_id, fps = _build_context(tmp_path)
+    action = _create_corrected_action(database, video_id, fps)
+    service = ReprocessingService(
+        database,
+        storage,
+        runner,
+        window_seconds=1,
+        prefer_csrt=False,
+    )
+    with database.session() as session:
+        original_action = session.get(ReviewAction, action.id)
+        original_track = session.get(Track, "proposal-track")
+        original_keyframes = list(
+            session.scalars(
+                select(TrackKeyframe)
+                .where(TrackKeyframe.track_id == "proposal-track")
+                .order_by(TrackKeyframe.frame_index)
+            )
+        )
+        assert original_action is not None
+        assert original_track is not None
+        action_state = deepcopy(original_action.after_state)
+        track_values = (
+            original_track.start_frame,
+            original_track.end_frame,
+            deepcopy(original_track.confidence_summary),
+        )
+        keyframe_values = [
+            (
+                item.id,
+                item.frame_index,
+                item.x1,
+                item.y1,
+                item.x2,
+                item.y2,
+                item.locked,
+            )
+            for item in original_keyframes
+        ]
+
+    try:
+        requested = service.request(action.id)
+        with database.session() as session:
+            visible_job = session.get(ProcessingJob, requested.job.id)
+            assert visible_job is not None
+            assert visible_job.job_type == JobType.REPROCESS
+            assert visible_job.payload["source_action_id"] == action.id
+            assert visible_job.status in {
+                JobStatus.QUEUED,
+                JobStatus.RUNNING,
+                JobStatus.COMPLETED,
+            }
+        runner.wait(requested.job.id, timeout=60)
+
+        with database.session() as session:
+            stored_action = session.get(ReviewAction, action.id)
+            stored_track = session.get(Track, "proposal-track")
+            stored_keyframes = list(
+                session.scalars(
+                    select(TrackKeyframe)
+                    .where(TrackKeyframe.track_id == "proposal-track")
+                    .order_by(TrackKeyframe.frame_index)
+                )
+            )
+            job = session.get(ProcessingJob, requested.job.id)
+            suggestions = list(
+                session.scalars(
+                    select(ReprocessingSuggestion)
+                    .where(ReprocessingSuggestion.source_action_id == action.id)
+                    .order_by(ReprocessingSuggestion.frame_index)
+                )
+            )
+            assert stored_action is not None
+            assert stored_track is not None
+            assert job is not None
+            assert job.status == JobStatus.COMPLETED
+            assert job.payload["suggestion_count"] == 14
+            assert stored_action.after_state == action_state
+            assert (
+                stored_track.start_frame,
+                stored_track.end_frame,
+                stored_track.confidence_summary,
+            ) == track_values
+            assert [
+                (
+                    item.id,
+                    item.frame_index,
+                    item.x1,
+                    item.y1,
+                    item.x2,
+                    item.y2,
+                    item.locked,
+                )
+                for item in stored_keyframes
+            ] == keyframe_values
+            assert len(suggestions) == 14
+            assert {item.propagation_method for item in suggestions} == {
+                "interpolation"
+            }
+            assert {item.direction for item in suggestions} == {
+                "backward",
+                "forward",
+            }
+            assert all(0 <= item.frame_index <= 14 for item in suggestions)
+            assert all(item.frame_index != 7 for item in suggestions)
+            assert all(item.seed_locked for item in suggestions)
+
+        with pytest.raises(ReprocessingConflictError, match="already has"):
+            service.request(action.id)
+    finally:
+        runner.shutdown()
+
+
+def test_manual_region_uses_static_fallback_within_declared_span(tmp_path: Path) -> None:
+    database, storage, runner, video_id, fps = _build_context(tmp_path)
+    with database.session() as session:
+        action, _ = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.CREATE_MANUAL_REGION,
+                expected_revision=0,
+                frame_index=7,
+                timestamp_ms=round(7 * 1000 / fps),
+                payload={
+                    "class_name": "face",
+                    "start_frame": 4,
+                    "end_frame": 10,
+                    "start_ms": round(4 * 1000 / fps),
+                    "end_ms": round(10 * 1000 / fps),
+                    "bbox": {
+                        "x1": 0.40,
+                        "y1": 0.20,
+                        "x2": 0.55,
+                        "y2": 0.45,
+                    },
+                },
+            ),
+            reviewer_session_id="manual-reviewer",
+        )
+
+    service = ReprocessingService(
+        database,
+        storage,
+        runner,
+        window_seconds=1,
+        prefer_csrt=False,
+    )
+    try:
+        requested = service.request(action.id)
+        runner.wait(requested.job.id, timeout=60)
+        suggestions = service.suggestions_for_action(action.id)
+
+        assert [item.frame_index for item in suggestions] == [4, 5, 6, 8, 9, 10]
+        assert {item.propagation_method for item in suggestions} == {"static"}
+        assert all(
+            (item.x1, item.y1, item.x2, item.y2) == (0.4, 0.2, 0.55, 0.45)
+            for item in suggestions
+        )
+        with database.session() as session:
+            assert session.get(Track, action.track_id) is None
+            stored_action = session.get(ReviewAction, action.id)
+            assert stored_action is not None
+            corrected = stored_action.after_state["tracks"][0]["keyframes"][0]
+            assert corrected["locked"] is True
+    finally:
+        runner.shutdown()

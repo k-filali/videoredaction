@@ -3,17 +3,21 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 
-from clearframe.api.dependencies import get_database
+from clearframe.api.dependencies import get_database, get_services
 from clearframe.api.schemas import (
     AuditActionRead,
     AuditLogRead,
+    JobRead,
     ManualRegionCreate,
+    ReprocessingSuggestionRead,
     ReviewMutationRead,
 )
 from clearframe.database import Database
 from clearframe.domain.enums import ReviewActionType
 from clearframe.domain.review import ReviewCommand, ReviewSnapshot
 from clearframe.models import ReviewAction
+from clearframe.services.container import ServiceContainer
+from clearframe.services.reprocessing import ReprocessingError
 from clearframe.services.review import (
     ReviewError,
     RevisionConflictError,
@@ -25,6 +29,7 @@ from clearframe.services.review import (
 
 router = APIRouter(prefix="/api/videos", tags=["review"])
 DatabaseDependency = Annotated[Database, Depends(get_database)]
+ServicesDependency = Annotated[ServiceContainer, Depends(get_services)]
 ReviewerSession = Annotated[
     str,
     Header(
@@ -55,26 +60,42 @@ def _raise_review_http_error(error: ReviewError) -> None:
 
 
 def _append(
-    database: Database,
+    services: ServiceContainer,
     video_id: str,
     command: ReviewCommand,
     reviewer_session: str,
 ) -> ReviewMutationRead:
     try:
-        with database.session() as session:
+        with services.database.session() as session:
             action, snapshot = append_review_action(
                 session,
                 video_id,
                 command,
                 reviewer_session_id=reviewer_session,
             )
-            return ReviewMutationRead(
-                action=AuditActionRead.from_model(action),
-                state=snapshot,
-            )
+            action_read = AuditActionRead.from_model(action)
     except ReviewError as exc:
         _raise_review_http_error(exc)
         raise AssertionError("unreachable") from exc
+
+    reprocessing_job: JobRead | None = None
+    reprocessing_note: str | None = None
+    if action_read.action_type in {
+        ReviewActionType.MOVE_REGION,
+        ReviewActionType.RESIZE_REGION,
+        ReviewActionType.CREATE_MANUAL_REGION,
+    }:
+        try:
+            requested = services.reprocess.request(action_read.id)
+            reprocessing_job = JobRead.from_model(requested.job)
+        except ReprocessingError:
+            reprocessing_note = "context reprocessing was not available for this edit"
+    return ReviewMutationRead(
+        action=action_read,
+        state=snapshot,
+        reprocessing_job=reprocessing_job,
+        reprocessing_note=reprocessing_note,
+    )
 
 
 @router.get("/{video_id}/tracks", response_model=ReviewSnapshot)
@@ -92,7 +113,7 @@ def update_track(
     video_id: str,
     track_id: str,
     command: ReviewCommand,
-    database: DatabaseDependency,
+    services: ServicesDependency,
     reviewer_session: ReviewerSession = "local-demo",
 ) -> ReviewMutationRead:
     if command.action_type in {
@@ -107,7 +128,7 @@ def update_track(
             detail="action is not valid for the track endpoint",
         )
     command = command.model_copy(update={"track_id": track_id})
-    return _append(database, video_id, command, reviewer_session)
+    return _append(services, video_id, command, reviewer_session)
 
 
 @router.post(
@@ -118,7 +139,7 @@ def update_track(
 def create_manual_region(
     video_id: str,
     region: ManualRegionCreate,
-    database: DatabaseDependency,
+    services: ServicesDependency,
     reviewer_session: ReviewerSession = "local-demo",
 ) -> ReviewMutationRead:
     payload = {
@@ -139,7 +160,7 @@ def create_manual_region(
         reason_code=region.reason_code,
         payload=payload,
     )
-    return _append(database, video_id, command, reviewer_session)
+    return _append(services, video_id, command, reviewer_session)
 
 
 @router.post(
@@ -150,10 +171,31 @@ def create_manual_region(
 def create_review_action(
     video_id: str,
     command: ReviewCommand,
-    database: DatabaseDependency,
+    services: ServicesDependency,
     reviewer_session: ReviewerSession = "local-demo",
 ) -> ReviewMutationRead:
-    return _append(database, video_id, command, reviewer_session)
+    return _append(services, video_id, command, reviewer_session)
+
+
+@router.get(
+    "/{video_id}/reprocessing-suggestions",
+    response_model=list[ReprocessingSuggestionRead],
+)
+def get_reprocessing_suggestions(
+    video_id: str,
+    services: ServicesDependency,
+) -> list[ReprocessingSuggestionRead]:
+    try:
+        suggestions = services.reprocess.suggestions_for_video(video_id)
+    except ReprocessingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return [
+        ReprocessingSuggestionRead.from_model(suggestion)
+        for suggestion in suggestions
+    ]
 
 
 @router.get("/{video_id}/audit", response_model=AuditLogRead)

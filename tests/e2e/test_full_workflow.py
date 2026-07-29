@@ -100,7 +100,27 @@ def test_upload_detect_review_export_workflow(tmp_path: Path) -> None:
                     },
                 )
                 assert corrected.status_code == 200
-                state = corrected.json()["state"]
+                corrected_payload = corrected.json()
+                assert corrected_payload["reprocessing_job"]["job_type"] == "REPROCESS"
+                await asyncio.to_thread(
+                    services.runner.wait,
+                    corrected_payload["reprocessing_job"]["id"],
+                    120,
+                )
+                suggestions = await client.get(
+                    f"/api/videos/{video_id}/reprocessing-suggestions"
+                )
+                assert suggestions.status_code == 200
+                assert suggestions.json()
+                assert {
+                    suggestion["source_action_id"]
+                    for suggestion in suggestions.json()
+                } == {corrected_payload["action"]["id"]}
+                assert all(
+                    suggestion["frame_index"] != 5
+                    for suggestion in suggestions.json()
+                )
+                state = corrected_payload["state"]
 
                 manual = await client.post(
                     f"/api/videos/{video_id}/manual-regions",

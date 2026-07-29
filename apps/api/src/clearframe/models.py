@@ -268,6 +268,54 @@ class ProcessingJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ReprocessingSuggestion(Base):
+    __tablename__ = "reprocessing_suggestions"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_action_id",
+            "frame_index",
+            name="uq_reprocessing_suggestion_action_frame",
+        ),
+        Index(
+            "ix_reprocessing_suggestions_video_track_frame",
+            "video_id",
+            "track_id",
+            "frame_index",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    video_id: Mapped[str] = mapped_column(
+        ForeignKey("video_assets.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source_action_id: Mapped[str] = mapped_column(
+        ForeignKey("review_actions.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("processing_jobs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    track_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_revision: Mapped[int] = mapped_column(Integer)
+    class_name: Mapped[str] = mapped_column(String(48))
+    seed_frame_index: Mapped[int] = mapped_column(Integer)
+    frame_index: Mapped[int] = mapped_column(Integer)
+    timestamp_ms: Mapped[int] = mapped_column(Integer)
+    x1: Mapped[float] = mapped_column(Float)
+    y1: Mapped[float] = mapped_column(Float)
+    x2: Mapped[float] = mapped_column(Float)
+    y2: Mapped[float] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float)
+    direction: Mapped[str] = mapped_column(String(16))
+    propagation_method: Mapped[str] = mapped_column(String(32))
+    seed_locked: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(24), default="PENDING")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class ImmutableAuditError(RuntimeError):
     pass
 

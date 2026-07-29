@@ -61,7 +61,7 @@ class LocalJobRunner:
                     if video is not None:
                         video.status = (
                             VideoStatus.READY_FOR_REVIEW
-                            if job.job_type == JobType.EXPORT
+                            if job.job_type in {JobType.EXPORT, JobType.REPROCESS}
                             else VideoStatus.FAILED
                         )
                         video.error_message = job.error_message
@@ -123,7 +123,7 @@ class LocalJobRunner:
                 if video is not None:
                     video.status = (
                         VideoStatus.READY_FOR_REVIEW
-                        if job.job_type == JobType.EXPORT
+                        if job.job_type in {JobType.EXPORT, JobType.REPROCESS}
                         else VideoStatus.FAILED
                     )
                     video.error_message = job.error_message

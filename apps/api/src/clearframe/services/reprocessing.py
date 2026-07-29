@@ -1,0 +1,603 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from itertools import pairwise
+from math import hypot
+from typing import Protocol, cast
+
+import cv2
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from clearframe.database import Database
+from clearframe.domain.enums import JobStatus, JobType, ReviewActionType
+from clearframe.domain.geometry import NormalizedBox
+from clearframe.domain.review import TrackReviewState
+from clearframe.jobs import JobContext, LocalJobRunner
+from clearframe.models import (
+    ProcessingJob,
+    ReprocessingSuggestion,
+    ReviewAction,
+    Track,
+    TrackKeyframe,
+    VideoAsset,
+)
+from clearframe.pipeline.detection import Frame
+from clearframe.storage import LocalStorage
+
+
+class ReprocessingError(ValueError):
+    pass
+
+
+class ReprocessingNotFoundError(ReprocessingError):
+    pass
+
+
+class ReprocessingValidationError(ReprocessingError):
+    pass
+
+
+class ReprocessingConflictError(ReprocessingError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class RequestedReprocessing:
+    job: ProcessingJob
+    source_action_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Seed:
+    action_id: str
+    video_id: str
+    proxy_uri: str
+    track_id: str
+    source_revision: int
+    class_name: str
+    frame_index: int
+    timestamp_ms: int
+    bbox: NormalizedBox
+    track_start_frame: int
+    track_end_frame: int
+    fps: float
+
+
+@dataclass(frozen=True, slots=True)
+class _SourcePoint:
+    frame_index: int
+    bbox: NormalizedBox
+
+
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    frame_index: int
+    timestamp_ms: int
+    bbox: NormalizedBox
+    confidence: float
+    direction: str
+    method: str
+    distance_frames: int
+
+
+class _CVTracker(Protocol):
+    def init(self, frame: Frame, box: tuple[int, int, int, int]) -> bool | None: ...
+
+    def update(
+        self,
+        frame: Frame,
+    ) -> tuple[bool, tuple[float, float, float, float]]: ...
+
+
+TrackerFactory = Callable[[], _CVTracker]
+ALLOWED_ACTIONS = frozenset(
+    {
+        ReviewActionType.MOVE_REGION,
+        ReviewActionType.RESIZE_REGION,
+        ReviewActionType.CREATE_MANUAL_REGION,
+    }
+)
+
+
+class ReprocessingService:
+    def __init__(
+        self,
+        database: Database,
+        storage: LocalStorage,
+        runner: LocalJobRunner,
+        *,
+        window_seconds: int = 3,
+        prefer_csrt: bool = True,
+    ) -> None:
+        if not 1 <= window_seconds <= 30:
+            raise ValueError("window_seconds must be between 1 and 30")
+        self.database = database
+        self.storage = storage
+        self.runner = runner
+        self.window_seconds = window_seconds
+        self.prefer_csrt = prefer_csrt
+
+    def request(self, source_action_id: str) -> RequestedReprocessing:
+        with self.database.session() as session:
+            seed = self._load_seed(session, source_action_id)
+            existing = session.scalar(
+                select(ReprocessingSuggestion.id).where(
+                    ReprocessingSuggestion.source_action_id == source_action_id
+                )
+            )
+            if existing is not None:
+                raise ReprocessingConflictError("action already has reprocessing suggestions")
+            active_jobs = session.scalars(
+                select(ProcessingJob).where(
+                    ProcessingJob.video_id == seed.video_id,
+                    ProcessingJob.job_type == JobType.REPROCESS,
+                    ProcessingJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
+                )
+            )
+            if any(
+                job.payload.get("source_action_id") == source_action_id
+                for job in active_jobs
+            ):
+                raise ReprocessingConflictError("action is already being reprocessed")
+
+            window_frames = max(1, round(self.window_seconds * seed.fps))
+            start_frame = max(seed.track_start_frame, seed.frame_index - window_frames)
+            end_frame = min(seed.track_end_frame, seed.frame_index + window_frames)
+            job = ProcessingJob(
+                video_id=seed.video_id,
+                job_type=JobType.REPROCESS,
+                payload={
+                    "source_action_id": source_action_id,
+                    "source_revision": seed.source_revision,
+                    "track_id": seed.track_id,
+                    "seed_frame_index": seed.frame_index,
+                    "window_seconds": self.window_seconds,
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                },
+                stage="queued",
+            )
+            session.add(job)
+            session.commit()
+
+        self.runner.submit(
+            job.id,
+            lambda context: self._run(
+                context,
+                job_id=job.id,
+                source_action_id=source_action_id,
+            ),
+        )
+        return RequestedReprocessing(job=job, source_action_id=source_action_id)
+
+    def suggestions_for_action(
+        self,
+        source_action_id: str,
+    ) -> tuple[ReprocessingSuggestion, ...]:
+        with self.database.session() as session:
+            suggestions = tuple(
+                session.scalars(
+                    select(ReprocessingSuggestion)
+                    .where(
+                        ReprocessingSuggestion.source_action_id == source_action_id
+                    )
+                    .order_by(ReprocessingSuggestion.frame_index)
+                )
+            )
+            for suggestion in suggestions:
+                session.expunge(suggestion)
+            return suggestions
+
+    def suggestions_for_video(
+        self,
+        video_id: str,
+    ) -> tuple[ReprocessingSuggestion, ...]:
+        with self.database.session() as session:
+            if session.get(VideoAsset, video_id) is None:
+                raise ReprocessingNotFoundError("video not found")
+            suggestions = tuple(
+                session.scalars(
+                    select(ReprocessingSuggestion)
+                    .where(ReprocessingSuggestion.video_id == video_id)
+                    .order_by(
+                        ReprocessingSuggestion.source_revision,
+                        ReprocessingSuggestion.frame_index,
+                    )
+                )
+            )
+            for suggestion in suggestions:
+                session.expunge(suggestion)
+            return suggestions
+
+    def _load_seed(self, session: Session, source_action_id: str) -> _Seed:
+        action = session.get(ReviewAction, source_action_id)
+        if action is None:
+            raise ReprocessingNotFoundError("review action not found")
+        try:
+            action_type = ReviewActionType(action.action_type)
+        except ValueError as exc:
+            raise ReprocessingValidationError("review action type is invalid") from exc
+        if action_type not in ALLOWED_ACTIONS:
+            raise ReprocessingValidationError(
+                "only move, resize, and manual-region actions can seed reprocessing"
+            )
+        if (
+            action.track_id is None
+            or action.frame_index is None
+            or action.timestamp_ms is None
+        ):
+            raise ReprocessingValidationError("review action is missing seed context")
+
+        state = self._state_from_action(action)
+        keyframe = next(
+            (
+                item
+                for item in state.keyframes
+                if item.frame_index == action.frame_index
+            ),
+            None,
+        )
+        if keyframe is None or not keyframe.locked:
+            raise ReprocessingValidationError(
+                "review action must contain a locked corrected keyframe"
+            )
+        if not state.start_frame <= action.frame_index <= state.end_frame:
+            raise ReprocessingValidationError("seed frame is outside the corrected track span")
+
+        video = session.get(VideoAsset, action.video_id)
+        if video is None:
+            raise ReprocessingNotFoundError("video not found")
+        if not video.proxy_uri or not self.storage.exists(video.proxy_uri):
+            raise ReprocessingValidationError("review proxy is not ready")
+        if video.fps is None or video.fps <= 0:
+            raise ReprocessingValidationError("video frame rate is unavailable")
+        return _Seed(
+            action_id=action.id,
+            video_id=action.video_id,
+            proxy_uri=video.proxy_uri,
+            track_id=action.track_id,
+            source_revision=action.revision,
+            class_name=state.class_name,
+            frame_index=action.frame_index,
+            timestamp_ms=action.timestamp_ms,
+            bbox=keyframe.bbox,
+            track_start_frame=state.start_frame,
+            track_end_frame=state.end_frame,
+            fps=video.fps,
+        )
+
+    @staticmethod
+    def _state_from_action(action: ReviewAction) -> TrackReviewState:
+        raw_states = action.after_state.get("tracks", [])
+        try:
+            states = [
+                TrackReviewState.model_validate(raw)
+                for raw in raw_states
+                if isinstance(raw, dict)
+            ]
+        except ValueError as exc:
+            raise ReprocessingValidationError(
+                "review action contains invalid corrected geometry"
+            ) from exc
+        for state in states:
+            if state.track_id == action.track_id:
+                return state
+        raise ReprocessingValidationError(
+            "review action does not contain its corrected track state"
+        )
+
+    def _run(
+        self,
+        context: JobContext,
+        *,
+        job_id: str,
+        source_action_id: str,
+    ) -> None:
+        with self.database.session() as session:
+            seed = self._load_seed(session, source_action_id)
+            source_points = self._source_points(session, seed.track_id)
+
+        window_frames = max(1, round(self.window_seconds * seed.fps))
+        start_frame = max(seed.track_start_frame, seed.frame_index - window_frames)
+        end_frame = min(seed.track_end_frame, seed.frame_index + window_frames)
+        context.update(0.08, "loading corrected context")
+
+        capture = cv2.VideoCapture(str(self.storage.path_for(seed.proxy_uri)))
+        if not capture.isOpened():
+            raise ReprocessingValidationError("review proxy could not be opened")
+        capture_fps = float(capture.get(cv2.CAP_PROP_FPS))
+        fps = capture_fps if capture_fps > 0 else seed.fps
+        try:
+            candidates: list[_Candidate] | None = None
+            tracker_factory = self._csrt_factory() if self.prefer_csrt else None
+            if tracker_factory is not None:
+                candidates = self._propagate_csrt(
+                    capture,
+                    seed=seed,
+                    start_frame=start_frame,
+                    end_frame=end_frame,
+                    fps=fps,
+                    tracker_factory=tracker_factory,
+                )
+            if candidates is None:
+                candidates = self._propagate_fallback(
+                    capture,
+                    seed=seed,
+                    source_points=source_points,
+                    start_frame=start_frame,
+                    end_frame=end_frame,
+                    fps=fps,
+                )
+        finally:
+            capture.release()
+
+        context.update(0.78, "storing reprocessing suggestions")
+        with self.database.session() as session:
+            action = session.get(ReviewAction, source_action_id)
+            job = session.get(ProcessingJob, job_id)
+            if action is None or job is None:
+                raise ReprocessingNotFoundError("reprocessing records disappeared")
+            session.add_all(
+                ReprocessingSuggestion(
+                    video_id=seed.video_id,
+                    source_action_id=source_action_id,
+                    job_id=job_id,
+                    track_id=seed.track_id,
+                    source_revision=seed.source_revision,
+                    class_name=seed.class_name,
+                    seed_frame_index=seed.frame_index,
+                    frame_index=candidate.frame_index,
+                    timestamp_ms=candidate.timestamp_ms,
+                    x1=candidate.bbox.x1,
+                    y1=candidate.bbox.y1,
+                    x2=candidate.bbox.x2,
+                    y2=candidate.bbox.y2,
+                    confidence=candidate.confidence,
+                    direction=candidate.direction,
+                    propagation_method=candidate.method,
+                    seed_locked=True,
+                    status="PENDING",
+                    metadata_json={
+                        "distance_frames": candidate.distance_frames,
+                        "window_seconds": self.window_seconds,
+                    },
+                )
+                for candidate in candidates
+            )
+            job.payload = {
+                **job.payload,
+                "suggestion_count": len(candidates),
+                "propagation_methods": sorted(
+                    {candidate.method for candidate in candidates}
+                ),
+            }
+            session.commit()
+        context.update(0.96, "suggestions ready")
+
+    @staticmethod
+    def _source_points(session: Session, track_id: str) -> tuple[_SourcePoint, ...]:
+        if session.get(Track, track_id) is None:
+            return ()
+        rows = session.scalars(
+            select(TrackKeyframe)
+            .where(TrackKeyframe.track_id == track_id)
+            .order_by(TrackKeyframe.frame_index)
+        )
+        return tuple(
+            _SourcePoint(
+                frame_index=row.frame_index,
+                bbox=NormalizedBox(x1=row.x1, y1=row.y1, x2=row.x2, y2=row.y2),
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _csrt_factory() -> TrackerFactory | None:
+        module = cast(object, cv2)
+        direct = getattr(module, "TrackerCSRT_create", None)
+        if callable(direct):
+            return cast(TrackerFactory, direct)
+        legacy = getattr(module, "legacy", None)
+        legacy_factory = (
+            getattr(legacy, "TrackerCSRT_create", None) if legacy is not None else None
+        )
+        return cast(TrackerFactory, legacy_factory) if callable(legacy_factory) else None
+
+    def _propagate_csrt(
+        self,
+        capture: cv2.VideoCapture,
+        *,
+        seed: _Seed,
+        start_frame: int,
+        end_frame: int,
+        fps: float,
+        tracker_factory: TrackerFactory,
+    ) -> list[_Candidate] | None:
+        seed_frame = self._read_frame(capture, seed.frame_index)
+        if seed_frame is None:
+            raise ReprocessingValidationError("corrected seed frame could not be decoded")
+        height, width = seed_frame.shape[:2]
+        seed_pixels = seed.bbox.to_pixels(width, height)
+        initial_box = (
+            seed_pixels.x1,
+            seed_pixels.y1,
+            seed_pixels.width,
+            seed_pixels.height,
+        )
+        candidates: list[_Candidate] = []
+        initialized = False
+        for direction, indices in (
+            ("backward", range(seed.frame_index - 1, start_frame - 1, -1)),
+            ("forward", range(seed.frame_index + 1, end_frame + 1)),
+        ):
+            tracker = tracker_factory()
+            result = tracker.init(seed_frame, initial_box)
+            if result is False:
+                continue
+            initialized = True
+            previous = seed.bbox
+            for frame_index in indices:
+                frame = self._read_frame(capture, frame_index)
+                if frame is None:
+                    break
+                success, raw_box = tracker.update(frame)
+                if not success:
+                    break
+                candidate_box = self._box_from_pixels(
+                    raw_box,
+                    width=frame.shape[1],
+                    height=frame.shape[0],
+                )
+                if candidate_box is None or not self._conservative_step(
+                    previous,
+                    candidate_box,
+                ):
+                    break
+                distance = abs(frame_index - seed.frame_index)
+                candidates.append(
+                    _Candidate(
+                        frame_index=frame_index,
+                        timestamp_ms=round(frame_index * 1000 / fps),
+                        bbox=candidate_box,
+                        confidence=max(
+                            0.45,
+                            0.88 - 0.38 * distance / max(1, end_frame - start_frame),
+                        ),
+                        direction=direction,
+                        method="csrt",
+                        distance_frames=distance,
+                    )
+                )
+                previous = candidate_box
+        return sorted(candidates, key=lambda item: item.frame_index) if initialized else None
+
+    def _propagate_fallback(
+        self,
+        capture: cv2.VideoCapture,
+        *,
+        seed: _Seed,
+        source_points: Sequence[_SourcePoint],
+        start_frame: int,
+        end_frame: int,
+        fps: float,
+    ) -> list[_Candidate]:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        seed_source = self._box_at_frame(source_points, seed.frame_index)
+        method = "interpolation" if seed_source is not None else "static"
+        deltas = (
+            (
+                seed.bbox.x1 - seed_source.x1,
+                seed.bbox.y1 - seed_source.y1,
+                seed.bbox.x2 - seed_source.x2,
+                seed.bbox.y2 - seed_source.y2,
+            )
+            if seed_source is not None
+            else None
+        )
+        maximum_distance = max(
+            1,
+            seed.frame_index - start_frame,
+            end_frame - seed.frame_index,
+        )
+        candidates: list[_Candidate] = []
+        for frame_index in range(start_frame, end_frame + 1):
+            success, _ = capture.read()
+            if not success:
+                break
+            if frame_index == seed.frame_index:
+                continue
+            distance = abs(frame_index - seed.frame_index)
+            baseline = self._box_at_frame(source_points, frame_index)
+            if baseline is not None and deltas is not None:
+                influence = max(0.25, 1.0 - 0.75 * distance / maximum_distance)
+                bbox = self._clamped_box(
+                    baseline.x1 + deltas[0] * influence,
+                    baseline.y1 + deltas[1] * influence,
+                    baseline.x2 + deltas[2] * influence,
+                    baseline.y2 + deltas[3] * influence,
+                )
+            else:
+                bbox = seed.bbox
+            candidates.append(
+                _Candidate(
+                    frame_index=frame_index,
+                    timestamp_ms=round(frame_index * 1000 / fps),
+                    bbox=bbox,
+                    confidence=max(0.4, 0.78 - 0.33 * distance / maximum_distance),
+                    direction=(
+                        "backward" if frame_index < seed.frame_index else "forward"
+                    ),
+                    method=method,
+                    distance_frames=distance,
+                )
+            )
+        return candidates
+
+    @staticmethod
+    def _read_frame(capture: cv2.VideoCapture, frame_index: int) -> Frame | None:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        success, frame = capture.read()
+        return cast(Frame, frame) if success else None
+
+    @classmethod
+    def _box_at_frame(
+        cls,
+        points: Sequence[_SourcePoint],
+        frame_index: int,
+    ) -> NormalizedBox | None:
+        if not points:
+            return None
+        if frame_index <= points[0].frame_index:
+            return points[0].bbox
+        if frame_index >= points[-1].frame_index:
+            return points[-1].bbox
+        for before, after in pairwise(points):
+            if before.frame_index <= frame_index <= after.frame_index:
+                distance = after.frame_index - before.frame_index
+                progress = (frame_index - before.frame_index) / distance
+                return before.bbox.interpolate(after.bbox, progress)
+        return None
+
+    @staticmethod
+    def _clamped_box(x1: float, y1: float, x2: float, y2: float) -> NormalizedBox:
+        left = min(0.999999, max(0.0, x1))
+        top = min(0.999999, max(0.0, y1))
+        right = min(1.0, max(left + 0.000001, x2))
+        bottom = min(1.0, max(top + 0.000001, y2))
+        return NormalizedBox(x1=left, y1=top, x2=right, y2=bottom)
+
+    @classmethod
+    def _box_from_pixels(
+        cls,
+        raw: tuple[float, float, float, float],
+        *,
+        width: int,
+        height: int,
+    ) -> NormalizedBox | None:
+        x, y, box_width, box_height = raw
+        if width <= 0 or height <= 0 or box_width <= 1 or box_height <= 1:
+            return None
+        return cls._clamped_box(
+            x / width,
+            y / height,
+            (x + box_width) / width,
+            (y + box_height) / height,
+        )
+
+    @staticmethod
+    def _conservative_step(previous: NormalizedBox, current: NormalizedBox) -> bool:
+        previous_area = previous.area()
+        area_ratio = current.area() / previous_area
+        previous_center = ((previous.x1 + previous.x2) / 2, (previous.y1 + previous.y2) / 2)
+        current_center = ((current.x1 + current.x2) / 2, (current.y1 + current.y2) / 2)
+        displacement = hypot(
+            current_center[0] - previous_center[0],
+            current_center[1] - previous_center[1],
+        )
+        return (
+            0.5 <= area_ratio <= 2.0
+            and displacement <= 0.15
+            and previous.iou(current) >= 0.05
+        )

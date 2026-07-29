@@ -13,7 +13,13 @@ from clearframe.domain.enums import (
 )
 from clearframe.domain.geometry import NormalizedBox
 from clearframe.domain.review import ReviewSnapshot
-from clearframe.models import ExportArtifact, ProcessingJob, ReviewAction, VideoAsset
+from clearframe.models import (
+    ExportArtifact,
+    ProcessingJob,
+    ReprocessingSuggestion,
+    ReviewAction,
+    VideoAsset,
+)
 
 
 class VideoRead(BaseModel):
@@ -157,6 +163,58 @@ class AuditActionRead(BaseModel):
 class ReviewMutationRead(BaseModel):
     action: AuditActionRead
     state: ReviewSnapshot
+    reprocessing_job: JobRead | None = None
+    reprocessing_note: str | None = None
+
+
+class ReprocessingSuggestionRead(BaseModel):
+    id: str
+    source_action_id: str
+    job_id: str
+    track_id: str
+    source_revision: int
+    class_name: str
+    seed_frame_index: int
+    frame_index: int
+    timestamp_ms: int
+    bbox: NormalizedBox
+    confidence: float
+    direction: str
+    propagation_method: str
+    seed_locked: bool
+    status: str
+    metadata: dict[str, Any]
+    created_at: datetime
+
+    @classmethod
+    def from_model(
+        cls,
+        suggestion: ReprocessingSuggestion,
+    ) -> "ReprocessingSuggestionRead":
+        return cls(
+            id=suggestion.id,
+            source_action_id=suggestion.source_action_id,
+            job_id=suggestion.job_id,
+            track_id=suggestion.track_id,
+            source_revision=suggestion.source_revision,
+            class_name=suggestion.class_name,
+            seed_frame_index=suggestion.seed_frame_index,
+            frame_index=suggestion.frame_index,
+            timestamp_ms=suggestion.timestamp_ms,
+            bbox=NormalizedBox(
+                x1=suggestion.x1,
+                y1=suggestion.y1,
+                x2=suggestion.x2,
+                y2=suggestion.y2,
+            ),
+            confidence=suggestion.confidence,
+            direction=suggestion.direction,
+            propagation_method=suggestion.propagation_method,
+            seed_locked=suggestion.seed_locked,
+            status=suggestion.status,
+            metadata=suggestion.metadata_json,
+            created_at=suggestion.created_at,
+        )
 
 
 class AuditLogRead(BaseModel):
