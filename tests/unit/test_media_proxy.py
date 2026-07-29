@@ -6,6 +6,7 @@ import pytest
 from clearframe.media import (
     H264_NVENC,
     LIBX264_FAST,
+    PROXY_PROFILE_VERSION,
     MediaError,
     MediaMetadata,
     MediaProcessor,
@@ -131,6 +132,52 @@ def test_proxy_transcodes_when_stream_copy_is_ineligible(
     assert video_codec(command) == "libx264"
     assert "-vf" in command
     assert processor.probed_paths == [destination]
+
+
+def test_small_non_h264_proxy_is_not_upscaled(tmp_path: Path) -> None:
+    processor = RecordingMediaProcessor(
+        metadata(codec="hevc", width=640, height=360)
+    )
+    destination = tmp_path / "proxy.mp4"
+
+    processor.generate_proxy(
+        tmp_path / "source.mp4",
+        destination,
+        metadata=processor.source_metadata,
+    )
+
+    filter_value = processor.commands[0][processor.commands[0].index("-vf") + 1]
+    assert "min(1280,iw)" in filter_value
+    assert "min(720,ih)" in filter_value
+    assert processor.expected_proxy_dimensions(processor.source_metadata) == (640, 360)
+
+
+def test_proxy_assessment_marks_legacy_upscale_as_stale_but_timeline_safe() -> None:
+    source = metadata(width=640, height=360)
+    legacy_proxy = metadata(width=1280, height=720)
+
+    assessment = MediaProcessor.assess_proxy(source, legacy_proxy)
+
+    assert PROXY_PROFILE_VERSION == 2
+    assert assessment.current is False
+    assert assessment.timeline_compatible is True
+    assert "proxy upscales the source" in assessment.reasons
+
+
+def test_proxy_assessment_blocks_track_reuse_when_frame_rate_changes() -> None:
+    source = metadata(width=640, height=360)
+    mismatched_proxy = MediaMetadata(
+        **{
+            **source.as_dict(),
+            "fps": 24.0,
+            "frame_count_estimate": 1_440,
+        }
+    )
+
+    assessment = MediaProcessor.assess_proxy(source, mismatched_proxy)
+
+    assert assessment.current is False
+    assert assessment.timeline_compatible is False
 
 
 def test_failed_remux_cleans_partial_output_and_transcodes(tmp_path: Path) -> None:

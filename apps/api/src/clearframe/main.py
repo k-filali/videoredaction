@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Path("data").mkdir(parents=True, exist_ok=True)
     app.state.database.create_schema()
     app.state.services.runner.recover_interrupted_jobs()
+    app.state.services.proxy.reconcile_all()
     try:
         yield
     finally:

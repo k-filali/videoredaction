@@ -58,7 +58,7 @@ class LocalJobRunner:
                 job.completed_at = utc_now()
                 if job.video_id:
                     video = session.get(VideoAsset, job.video_id)
-                    if video is not None:
+                    if video is not None and job.job_type != JobType.PROXY:
                         video.status = (
                             VideoStatus.READY_FOR_REVIEW
                             if job.job_type in {JobType.EXPORT, JobType.REPROCESS}
@@ -120,7 +120,7 @@ class LocalJobRunner:
             job.completed_at = utc_now()
             if job.video_id:
                 video = session.get(VideoAsset, job.video_id)
-                if video is not None:
+                if video is not None and job.job_type != JobType.PROXY:
                     video.status = (
                         VideoStatus.READY_FOR_REVIEW
                         if job.job_type in {JobType.EXPORT, JobType.REPROCESS}

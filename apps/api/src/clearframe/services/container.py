@@ -6,6 +6,7 @@ from clearframe.jobs import LocalJobRunner
 from clearframe.media import MediaProcessor
 from clearframe.services.export import ExportService
 from clearframe.services.ingest import IngestService
+from clearframe.services.proxy import ProxyService
 from clearframe.services.reprocessing import ReprocessingService
 from clearframe.storage import LocalStorage
 
@@ -17,6 +18,7 @@ class ServiceContainer:
     media: MediaProcessor
     runner: LocalJobRunner
     ingest: IngestService
+    proxy: ProxyService
     export: ExportService
     reprocess: ReprocessingService
 
@@ -38,6 +40,12 @@ class ServiceContainer:
             runner=runner,
             max_upload_mb=settings.max_upload_mb,
         )
+        proxy = ProxyService(
+            database=database,
+            storage=storage,
+            media=media,
+            runner=runner,
+        )
         export = ExportService(
             database=database,
             storage=storage,
@@ -57,6 +65,7 @@ class ServiceContainer:
             media=media,
             runner=runner,
             ingest=ingest,
+            proxy=proxy,
             export=export,
             reprocess=reprocess,
         )

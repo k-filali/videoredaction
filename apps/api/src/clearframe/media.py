@@ -1,4 +1,5 @@
 import hashlib
+import math
 import re
 import shutil
 import subprocess
@@ -40,6 +41,13 @@ class MediaMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class ProxyAssessment:
+    current: bool
+    timeline_compatible: bool
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class H264Encoder:
     name: str
     ffmpeg_arguments: tuple[str, ...]
@@ -76,6 +84,10 @@ H264_NVENC = H264Encoder(
     ),
     hardware_accelerated=True,
 )
+
+PROXY_PROFILE_VERSION = 2
+PROXY_MAX_WIDTH = 1280
+PROXY_MAX_HEIGHT = 720
 
 
 def sniff_media(path: Path) -> MediaKind:
@@ -311,8 +323,69 @@ class MediaProcessor:
     def _can_remux_proxy(metadata: MediaMetadata) -> bool:
         return (
             metadata.codec.casefold() == "h264"
-            and metadata.width <= 1280
-            and metadata.height <= 720
+            and metadata.width <= PROXY_MAX_WIDTH
+            and metadata.height <= PROXY_MAX_HEIGHT
+        )
+
+    @classmethod
+    def proxy_strategy(cls, metadata: MediaMetadata) -> str:
+        return "remux" if cls._can_remux_proxy(metadata) else "transcode"
+
+    @classmethod
+    def expected_proxy_dimensions(cls, metadata: MediaMetadata) -> tuple[int, int]:
+        if cls._can_remux_proxy(metadata):
+            return metadata.width, metadata.height
+
+        scale = min(
+            1.0,
+            PROXY_MAX_WIDTH / metadata.width,
+            PROXY_MAX_HEIGHT / metadata.height,
+        )
+        width = max(2, math.floor(metadata.width * scale / 2) * 2)
+        height = max(2, math.floor(metadata.height * scale / 2) * 2)
+        return width, height
+
+    @classmethod
+    def assess_proxy(
+        cls,
+        source: MediaMetadata,
+        proxy: MediaMetadata,
+    ) -> ProxyAssessment:
+        reasons: list[str] = []
+        expected_width, expected_height = cls.expected_proxy_dimensions(source)
+        if abs(proxy.width - expected_width) > 2 or abs(proxy.height - expected_height) > 2:
+            reasons.append(
+                f"dimensions {proxy.width}x{proxy.height} do not match "
+                f"{expected_width}x{expected_height}"
+            )
+        if proxy.width > source.width or proxy.height > source.height:
+            reasons.append("proxy upscales the source")
+        if proxy.codec.casefold() != "h264":
+            reasons.append(f"codec {proxy.codec} is not h264")
+        if proxy.audio_present != source.audio_present:
+            reasons.append("audio presence differs from the source")
+
+        fps_tolerance = max(0.05, source.fps * 0.005)
+        fps_compatible = abs(proxy.fps - source.fps) <= fps_tolerance
+        if not fps_compatible:
+            reasons.append(
+                f"frame rate {proxy.fps:g} does not match source {source.fps:g}"
+            )
+
+        duration_tolerance_ms = max(500, round(2_000 / source.fps))
+        duration_compatible = (
+            abs(proxy.duration_ms - source.duration_ms) <= duration_tolerance_ms
+        )
+        if not duration_compatible:
+            reasons.append(
+                f"duration {proxy.duration_ms}ms does not match "
+                f"source {source.duration_ms}ms"
+            )
+
+        return ProxyAssessment(
+            current=not reasons,
+            timeline_compatible=fps_compatible and duration_compatible,
+            reasons=tuple(reasons),
         )
 
     @staticmethod
@@ -355,7 +428,10 @@ class MediaProcessor:
             "-map",
             "0:a:0?",
             "-vf",
-            "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2",
+            (
+                "scale=w='min(1280,iw)':h='min(720,ih)':"
+                "force_original_aspect_ratio=decrease:force_divisible_by=2"
+            ),
             "-c:v",
             "libx264",
             "-preset",
