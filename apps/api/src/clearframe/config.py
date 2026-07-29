@@ -33,6 +33,7 @@ class Settings(BaseSettings):
         default="clearframe-gpu-worker",
         pattern=r"^[a-z][a-z0-9-]{0,62}$",
     )
+    require_cuda: bool = False
     storage_backend: Literal["local", "gcs"] = "local"
     storage_root: Path = Path("./storage")
     storage_scratch_root: Path = Path("./storage/tmp/cloud")

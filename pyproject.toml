@@ -15,7 +15,7 @@ dependencies = [
   "google-cloud-storage>=3.13,<4",
   "imageio-ffmpeg>=0.6,<1",
   "numpy>=2.2,<3",
-  "onnxruntime-gpu>=1.27,<2",
+  "onnxruntime-gpu>=1.26,<1.27",
   "opencv-python-headless>=4.11,<5",
   "pydantic-settings>=2.10,<3",
   "psycopg[binary]==3.3.4",

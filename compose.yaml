@@ -4,7 +4,11 @@ services:
   api:
     build:
       context: .
-      dockerfile: docker/api.Dockerfile
+      dockerfile: docker/gpu-worker.Dockerfile
+    command:
+      - python
+      - -m
+      - clearframe.main
     gpus:
       - driver: nvidia
         count: all
@@ -19,6 +23,7 @@ services:
       CLEARFRAME_STORAGE_ROOT: /app/storage
       CLEARFRAME_WEB_ORIGIN: http://localhost:5173
       CLEARFRAME_BUILD_ID: ${CLEARFRAME_BUILD_ID:-local-compose}
+      CLEARFRAME_RUN_MIGRATIONS: "true"
       TMPDIR: /app/storage/tmp/multipart
     volumes:
       - clearframe-data:/app/data
@@ -53,6 +58,7 @@ services:
         condition: service_healthy
     environment:
       CLEARFRAME_ACCESS_TOKEN: ${CLEARFRAME_ACCESS_TOKEN:?Set CLEARFRAME_ACCESS_TOKEN before starting ClearFrame}
+      CLEARFRAME_API_URL: http://api:8000
     ports:
       - "127.0.0.1:5173:8080"
     healthcheck:

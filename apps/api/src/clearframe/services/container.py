@@ -94,6 +94,7 @@ class ServiceContainer:
             storage=storage,
             runner=runner,
             registry_path=settings.model_registry_path,
+            require_cuda=settings.require_cuda,
         )
         export = ExportService(
             database=database,

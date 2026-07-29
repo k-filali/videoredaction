@@ -12,6 +12,9 @@ RUN pnpm --dir apps/web build
 
 FROM nginx:1.29-alpine
 
+ENV NGINX_ENVSUBST_FILTER=^CLEARFRAME_
+
+COPY --chmod=755 docker/web-entrypoint.sh /docker-entrypoint.d/15-clearframe-env.sh
 COPY docker/nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /workspace/apps/web/dist /usr/share/nginx/html
 

@@ -184,12 +184,14 @@ class ProcessingService:
         registry: ModelRegistry | None = None,
         registry_path: Path = DEFAULT_REGISTRY_PATH,
         weights_root: Path | None = None,
+        require_cuda: bool = False,
     ) -> None:
         self.database = database
         self.storage = storage
         self.runner = runner
         self.registry_path = registry_path.resolve()
         self.weights_root = weights_root
+        self.require_cuda = require_cuda
         self.registry = registry or load_model_registry(
             self.registry_path,
             weights_root=weights_root,
@@ -370,6 +372,17 @@ class ProcessingService:
         ]
         if unavailable:
             raise DetectorSelectionError("; ".join(unavailable))
+        if self.require_cuda:
+            non_cuda = [
+                binding.entry.id
+                for binding in bindings
+                if _detector_device(binding.detector) != "cuda"
+            ]
+            if non_cuda:
+                raise DetectorSelectionError(
+                    "CUDA inference is required but unavailable for: "
+                    + ", ".join(non_cuda)
+                )
         return bindings
 
     def _build_detector(self, entry: ModelEntry) -> Detector:

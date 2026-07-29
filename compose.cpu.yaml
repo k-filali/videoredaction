@@ -1,3 +1,6 @@
 services:
   api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
     gpus: !reset []

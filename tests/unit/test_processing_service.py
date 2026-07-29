@@ -172,6 +172,22 @@ def test_default_processing_loads_real_model_adapters(tmp_path: Path) -> None:
         runner.shutdown()
 
 
+def test_processing_can_require_cuda_inference(tmp_path: Path) -> None:
+    database, storage, runner, _, _ = _build_processing(tmp_path)
+    service = ProcessingService(
+        database,
+        storage,
+        runner,
+        registry_path=MOCK_MODEL_REGISTRY_PATH,
+        require_cuda=True,
+    )
+    try:
+        with pytest.raises(DetectorSelectionError, match="CUDA inference is required"):
+            service._select_bindings(None)
+    finally:
+        runner.shutdown()
+
+
 class _ConcurrentDetector:
     name = "concurrent_test"
     version = "1.0"
