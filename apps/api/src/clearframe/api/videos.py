@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from sqlalchemy import select
 
 from clearframe.api.dependencies import get_database, get_services
@@ -22,11 +22,35 @@ from clearframe.services.ingest import (
     IngestError,
     UploadTooLargeError,
 )
+from clearframe.storage import ArtifactDelivery
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 
 DatabaseDependency = Annotated[Database, Depends(get_database)]
 ServicesDependency = Annotated[ServiceContainer, Depends(get_services)]
+private_media_headers = {"Cache-Control": "private, no-store"}
+
+
+def _media_response(
+    delivery: ArtifactDelivery,
+    *,
+    media_type: str,
+) -> Response:
+    if delivery.kind == "redirect":
+        if delivery.url is None:
+            raise RuntimeError("redirect delivery is missing a URL")
+        return RedirectResponse(
+            delivery.url,
+            status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+            headers=private_media_headers,
+        )
+    if delivery.path is None:
+        raise RuntimeError("local delivery is missing a path")
+    return FileResponse(
+        delivery.path,
+        media_type=media_type,
+        headers=private_media_headers,
+    )
 
 
 def _video_or_404(database: Database, video_id: str) -> VideoAsset:
@@ -107,14 +131,13 @@ def get_proxy(
     video_id: str,
     database: DatabaseDependency,
     services: ServicesDependency,
-) -> FileResponse:
+) -> Response:
     video = _video_or_404(database, video_id)
     if not video.proxy_uri or not services.storage.exists(video.proxy_uri):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="proxy is not ready")
-    return FileResponse(
-        services.storage.path_for(video.proxy_uri),
+    return _media_response(
+        services.storage.delivery_for(video.proxy_uri),
         media_type="video/mp4",
-        headers={"Cache-Control": "private, no-store"},
     )
 
 
@@ -123,12 +146,11 @@ def get_thumbnail(
     video_id: str,
     database: DatabaseDependency,
     services: ServicesDependency,
-) -> FileResponse:
+) -> Response:
     video = _video_or_404(database, video_id)
     if not video.thumbnail_uri or not services.storage.exists(video.thumbnail_uri):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="thumbnail not found")
-    return FileResponse(
-        services.storage.path_for(video.thumbnail_uri),
+    return _media_response(
+        services.storage.delivery_for(video.thumbnail_uri),
         media_type="image/jpeg",
-        headers={"Cache-Control": "private, no-store"},
     )

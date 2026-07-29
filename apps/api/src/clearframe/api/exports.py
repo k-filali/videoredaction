@@ -2,7 +2,7 @@ import json
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import select
 
 from clearframe.api.dependencies import get_database, get_services
@@ -16,6 +16,7 @@ from clearframe.services.export import (
     ExportValidationError,
 )
 from clearframe.services.review import RevisionConflictError
+from clearframe.storage import ArtifactDelivery
 
 router = APIRouter(prefix="/api", tags=["exports"])
 DatabaseDependency = Annotated[Database, Depends(get_database)]
@@ -24,6 +25,33 @@ ReviewerSession = Annotated[
     str,
     Header(alias="X-Reviewer-Session", min_length=1, max_length=64),
 ]
+private_download_headers = {"Cache-Control": "private, no-store"}
+
+
+def _download_response(
+    delivery: ArtifactDelivery,
+    *,
+    filename: str,
+) -> Response:
+    if delivery.kind == "redirect":
+        if delivery.url is None:
+            raise RuntimeError("redirect delivery is missing a URL")
+        return RedirectResponse(
+            delivery.url,
+            status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+            headers={
+                **private_download_headers,
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            },
+        )
+    if delivery.path is None:
+        raise RuntimeError("local delivery is missing a path")
+    return FileResponse(
+        delivery.path,
+        media_type="video/mp4",
+        filename=filename,
+        headers=private_download_headers,
+    )
 
 
 def _export_or_404(database: Database, export_id: str) -> ExportArtifact:
@@ -82,7 +110,7 @@ def download_export(
     export_id: str,
     database: DatabaseDependency,
     services: ServicesDependency,
-) -> FileResponse:
+) -> Response:
     artifact = _export_or_404(database, export_id)
     if (
         artifact.status != ExportStatus.COMPLETED
@@ -90,11 +118,9 @@ def download_export(
         or not services.storage.exists(artifact.export_uri)
     ):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="export is not ready")
-    return FileResponse(
-        services.storage.path_for(artifact.export_uri),
-        media_type="video/mp4",
+    return _download_response(
+        services.storage.delivery_for(artifact.export_uri),
         filename=f"clearframe-{artifact.video_id[:8]}-redacted.mp4",
-        headers={"Cache-Control": "private, no-store"},
     )
 
 
