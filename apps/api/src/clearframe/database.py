@@ -14,18 +14,40 @@ class Base(DeclarativeBase):
 
 class Database:
     def __init__(self, url: str) -> None:
+        is_sqlite = url.startswith("sqlite")
         connect_args: dict[str, Any] = {}
-        if url.startswith("sqlite"):
+        engine_options: dict[str, Any] = {}
+        if is_sqlite:
             connect_args["check_same_thread"] = False
+        else:
+            engine_options.update(
+                pool_pre_ping=True,
+                pool_size=5,
+                max_overflow=2,
+                pool_recycle=1800,
+                pool_timeout=30,
+            )
 
-        self.engine = create_engine(url, connect_args=connect_args)
-        if url.startswith("sqlite"):
+        self.engine = create_engine(
+            self._normalize_url(url),
+            connect_args=connect_args,
+            **engine_options,
+        )
+        if is_sqlite:
             event.listen(self.engine, "connect", self._enable_sqlite_foreign_keys)
         self.session_factory = sessionmaker(
             bind=self.engine,
             expire_on_commit=False,
             class_=Session,
         )
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        if url.startswith("postgresql://"):
+            return url.replace("postgresql://", "postgresql+psycopg://", 1)
+        if url.startswith("postgres://"):
+            return url.replace("postgres://", "postgresql+psycopg://", 1)
+        return url
 
     @staticmethod
     def _enable_sqlite_foreign_keys(
