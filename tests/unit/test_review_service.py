@@ -166,6 +166,108 @@ def test_manual_region_can_be_undone_and_redone(tmp_path: Path) -> None:
         assert redone.tracks[manual_track_id].source == TrackSource.MANUAL
 
 
+def test_merge_rejects_the_same_track(tmp_path: Path) -> None:
+    database = create_database(tmp_path / "self-merge.db")
+    video_id, track_id = seed_video(database)
+
+    with database.session() as session:
+        with pytest.raises(ReviewError, match="merged with itself"):
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.MERGE_TRACKS,
+                    expected_revision=0,
+                    track_id=track_id,
+                    payload={"other_track_id": track_id},
+                ),
+                reviewer_session_id="reviewer-a",
+            )
+        assert session.query(ReviewAction).count() == 0
+
+
+def test_redo_requires_an_active_undo_chain(tmp_path: Path) -> None:
+    database = create_database(tmp_path / "redo-chain.db")
+    video_id, track_id = seed_video(database)
+
+    with database.session() as session:
+        restored, _ = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.RESTORE_TRACK,
+                expected_revision=0,
+                track_id=track_id,
+            ),
+            reviewer_session_id="reviewer-a",
+        )
+        append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.REDACT_TRACK,
+                expected_revision=1,
+                track_id=track_id,
+            ),
+            reviewer_session_id="reviewer-a",
+        )
+
+        with pytest.raises(ReviewError, match="not currently undone"):
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.REDO,
+                    expected_revision=2,
+                    payload={"action_id": restored.id},
+                ),
+                reviewer_session_id="reviewer-a",
+            )
+        replayed = build_review_snapshot(session, video_id)
+        assert replayed.revision == 2
+        assert replayed.tracks[track_id].redacted is True
+
+
+def test_undo_rejects_a_superseded_track_edit(tmp_path: Path) -> None:
+    database = create_database(tmp_path / "stale-undo.db")
+    video_id, track_id = seed_video(database)
+
+    with database.session() as session:
+        restored, _ = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.RESTORE_TRACK,
+                expected_revision=0,
+                track_id=track_id,
+            ),
+            reviewer_session_id="reviewer-a",
+        )
+        append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.REDACT_TRACK,
+                expected_revision=1,
+                track_id=track_id,
+            ),
+            reviewer_session_id="reviewer-a",
+        )
+
+        with pytest.raises(ReviewError, match="newer action"):
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.UNDO,
+                    expected_revision=2,
+                    payload={"action_id": restored.id},
+                ),
+                reviewer_session_id="reviewer-a",
+            )
+        assert build_review_snapshot(session, video_id).tracks[track_id].redacted is True
+
+
 def test_review_actions_are_append_only(tmp_path: Path) -> None:
     database = create_database(tmp_path / "immutable.db")
     video_id, track_id = seed_video(database)

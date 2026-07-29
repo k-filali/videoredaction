@@ -294,6 +294,8 @@ def _updated_states(
         other_id = command.payload.get("other_track_id")
         if not isinstance(other_id, str):
             raise ReviewError("other_track_id is required")
+        if other_id == updated.track_id:
+            raise ReviewError("a track cannot be merged with itself")
         other = _required_target(snapshot, other_id)
         if other.class_name != updated.class_name:
             raise ReviewError("tracks must share a class before merging")
@@ -315,6 +317,29 @@ def _updated_states(
     return before, [_validated_state(updated)], inverse_of
 
 
+def _affected_track_ids(payload: dict[str, Any]) -> set[str]:
+    track_ids = {
+        TrackReviewState.model_validate(raw).track_id
+        for raw in payload.get("tracks", [])
+    }
+    track_ids.update(str(item) for item in payload.get("removed_track_ids", []))
+    return track_ids
+
+
+def _payload_matches_snapshot(
+    snapshot: ReviewSnapshot,
+    payload: dict[str, Any],
+) -> bool:
+    for raw_state in payload.get("tracks", []):
+        expected = TrackReviewState.model_validate(raw_state)
+        if snapshot.tracks.get(expected.track_id) != expected:
+            return False
+    return all(
+        str(track_id) not in snapshot.tracks
+        for track_id in payload.get("removed_track_ids", [])
+    )
+
+
 def _resolve_inverse(
     session: Session,
     snapshot: ReviewSnapshot,
@@ -326,6 +351,60 @@ def _resolve_inverse(
     target = session.get(ReviewAction, target_id)
     if target is None or target.video_id != snapshot.video_id:
         raise ReviewError("target action was not found")
+    if target.action_type in {
+        ReviewActionType.UNDO,
+        ReviewActionType.REDO,
+        ReviewActionType.EXPORT_REQUESTED,
+        ReviewActionType.EXPORT_COMPLETED,
+    }:
+        raise ReviewError("target action cannot be undone or redone")
+
+    latest_inverse = session.scalar(
+        select(ReviewAction)
+        .where(
+            ReviewAction.video_id == snapshot.video_id,
+            ReviewAction.inverse_of_action_id == target.id,
+        )
+        .order_by(ReviewAction.revision.desc())
+    )
+    if command.action_type == ReviewActionType.UNDO:
+        if (
+            latest_inverse is not None
+            and latest_inverse.action_type == ReviewActionType.UNDO
+        ):
+            raise ReviewError("target action is already undone")
+        expected_current = target.after_state
+    else:
+        if (
+            latest_inverse is None
+            or latest_inverse.action_type != ReviewActionType.UNDO
+        ):
+            raise ReviewError("target action is not currently undone")
+        expected_current = target.before_state
+
+    affected_ids = _affected_track_ids(target.before_state)
+    affected_ids.update(_affected_track_ids(target.after_state))
+    later_actions = session.scalars(
+        select(ReviewAction)
+        .where(
+            ReviewAction.video_id == snapshot.video_id,
+            ReviewAction.revision > target.revision,
+        )
+        .order_by(ReviewAction.revision)
+    )
+    latest_touch: ReviewAction | None = None
+    for action in later_actions:
+        action_ids = _affected_track_ids(action.before_state)
+        action_ids.update(_affected_track_ids(action.after_state))
+        if affected_ids & action_ids:
+            latest_touch = action
+    if latest_touch is not None and (
+        latest_inverse is None or latest_touch.id != latest_inverse.id
+    ):
+        raise ReviewError("a newer action has changed the target track")
+    if not _payload_matches_snapshot(snapshot, expected_current):
+        raise ReviewError("review state no longer matches the target action")
+
     desired_payload = (
         target.before_state if command.action_type == ReviewActionType.UNDO else target.after_state
     )
