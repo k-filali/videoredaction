@@ -507,6 +507,7 @@ export const VideoCanvas = forwardRef<VideoCanvasHandle, VideoCanvasProps>(
         <video
           ref={videoRef}
           className="video-source"
+          crossOrigin="anonymous"
           src={source}
           playsInline
           preload="auto"

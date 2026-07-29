@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, api, mediaUrl, uploadVideo } from "../api";
 import { formatTime, humanFileSize } from "../lib/geometry";
+import { processingPollDelay } from "../lib/polling";
 import type { ProcessingJob, VideoAsset, VideoStatusResponse } from "../types";
 import { Brand, PrivacyStatus } from "./Brand";
 import { Icon } from "./Icon";
@@ -225,16 +226,31 @@ export function Dashboard({ onOpenVideo, onNotify }: DashboardProps) {
 
   useEffect(() => {
     if (!videos.some((video) => workingStatuses.has(video.status))) return;
-    const timer = window.setInterval(() => void loadVideos(true), 1800);
+    const timer = window.setInterval(() => void loadVideos(true), 5000);
     return () => window.clearInterval(timer);
   }, [loadVideos, videos]);
 
   const prepareForReview = useCallback(async (videoId: string): Promise<VideoAsset> => {
     let detectionRequested = false;
+    let previousState = "";
+    let unchangedPolls = 0;
     while (true) {
       const status = await api.getVideoStatus(videoId);
       const latest = status.video;
       const job = activeJob(status);
+      const currentState = [
+        latest.status,
+        latest.active_model_run_id ?? "",
+        job?.id ?? "",
+        job?.stage ?? "",
+        job ? Math.round(job.progress * 100) : "",
+      ].join(":");
+      if (currentState === previousState) {
+        unchangedPolls += 1;
+      } else {
+        previousState = currentState;
+        unchangedPolls = 0;
+      }
       setJobsByVideo((current) => {
         if (job) return { ...current, [videoId]: job };
         const next = { ...current };
@@ -275,7 +291,9 @@ export function Dashboard({ onOpenVideo, onNotify }: DashboardProps) {
           if (!(error instanceof ApiError) || error.status !== 409) throw error;
         }
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 700));
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, processingPollDelay(unchangedPolls)),
+      );
     }
   }, []);
 

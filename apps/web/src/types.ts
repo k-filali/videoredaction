@@ -83,6 +83,20 @@ export interface UploadAccepted {
   job: ProcessingJob;
 }
 
+export type UploadCapability =
+  | { mode: "multipart" }
+  | {
+      mode: "resumable";
+      chunk_size_bytes: number;
+      max_upload_bytes: number;
+    };
+
+export interface ResumableUploadInitiated {
+  upload_id: string;
+  session_url: string;
+  chunk_size_bytes: number;
+}
+
 export interface ModelRun {
   id: string;
   video_id: string;

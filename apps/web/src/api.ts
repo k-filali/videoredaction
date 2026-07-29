@@ -11,11 +11,17 @@ import type {
   ReviewMutation,
   ReviewSnapshot,
   ProcessingAccepted,
+  ResumableUploadInitiated,
   UploadAccepted,
+  UploadCapability,
   VideoAsset,
   VideoListResponse,
   VideoStatusResponse,
 } from "./types";
+import {
+  RESUMABLE_CHUNK_SIZE_BYTES,
+  uploadFileResumable,
+} from "./lib/resumableUpload";
 
 const REVIEWER_SESSION_KEY = "clearframe-reviewer-session";
 
@@ -83,6 +89,29 @@ export function mediaUrl(path: string | null): string | null {
 
 export const api = {
   listVideos: () => request<VideoListResponse>("/api/videos"),
+
+  getUploadCapability: () =>
+    request<UploadCapability>("/api/uploads/capability"),
+
+  initiateUpload: (file: File) =>
+    request<ResumableUploadInitiated>("/api/uploads/initiate", {
+      method: "POST",
+      body: JSON.stringify({
+        filename: file.name,
+        content_type: file.type || "application/octet-stream",
+        size_bytes: file.size,
+        hashed_case_id: null,
+      }),
+    }),
+
+  completeUpload: (uploadId: string) =>
+    request<UploadAccepted>(
+      `/api/uploads/${encodeURIComponent(uploadId)}/complete`,
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+    ),
 
   getVideo: (videoId: string) => request<VideoAsset>(`/api/videos/${videoId}`),
 
@@ -173,7 +202,7 @@ export const api = {
     request<ExportArtifact>(`/api/exports/${exportId}`),
 };
 
-export function uploadVideo(
+function uploadVideoMultipart(
   file: File,
   onProgress: (progress: number) => void,
 ): Promise<UploadAccepted> {
@@ -205,4 +234,41 @@ export function uploadVideo(
     form.append("file", file);
     xhr.send(form);
   });
+}
+
+export async function uploadVideo(
+  file: File,
+  onProgress: (progress: number) => void,
+): Promise<UploadAccepted> {
+  let capability: UploadCapability;
+  try {
+    capability = await api.getUploadCapability();
+  } catch (error) {
+    if (
+      error instanceof ApiError &&
+      (error.status === 404 || error.status === 405)
+    ) {
+      return uploadVideoMultipart(file, onProgress);
+    }
+    throw error;
+  }
+  if (capability.mode !== "resumable") {
+    return uploadVideoMultipart(file, onProgress);
+  }
+  if (capability.chunk_size_bytes !== RESUMABLE_CHUNK_SIZE_BYTES) {
+    throw new ApiError("Cloud upload returned an unsupported chunk size", 500);
+  }
+  if (file.size > capability.max_upload_bytes) {
+    throw new ApiError(
+      `Video exceeds the ${Math.floor(capability.max_upload_bytes / (1024 * 1024))} MB limit`,
+      413,
+    );
+  }
+
+  const initiated = await api.initiateUpload(file);
+  if (initiated.chunk_size_bytes !== RESUMABLE_CHUNK_SIZE_BYTES) {
+    throw new ApiError("Cloud upload session returned an unsupported chunk size", 500);
+  }
+  await uploadFileResumable(file, initiated.session_url, onProgress);
+  return api.completeUpload(initiated.upload_id);
 }
