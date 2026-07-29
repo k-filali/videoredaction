@@ -15,13 +15,14 @@ def detection(
     class_name: str = "license_plate",
     *,
     x: float = 0.1,
+    confidence: float = 0.9,
 ) -> DetectionProposal:
     return DetectionProposal(
         frame_index=frame_index,
         timestamp_ms=frame_index * 100,
         class_name=class_name,
         bbox=NormalizedBox(x1=x, y1=0.2, x2=x + 0.2, y2=0.4),
-        confidence=0.9,
+        confidence=confidence,
         detector_name="test",
         detector_version="1",
     )
@@ -59,6 +60,27 @@ def test_interpolated_boxes_remain_normalized() -> None:
         assert all(0.0 <= value <= 1.0 for value in point.bbox.as_list())
         assert point.bbox.x1 < point.bbox.x2
         assert point.bbox.y1 < point.bbox.y2
+
+
+def test_sparse_tracker_preserves_virtual_interpolation_metrics() -> None:
+    track = IoUTracker(
+        iou_threshold=0.01,
+        max_gap=3,
+        materialize_interpolated=False,
+    ).track(
+        [
+            detection(0, x=0.1, confidence=0.5),
+            detection(3, x=0.2, confidence=1.0),
+        ]
+    )[0]
+
+    assert [point.frame_index for point in track.points] == [0, 3]
+    assert track.interpolates_gaps
+    assert track.observed_point_count == 2
+    assert track.interpolated_point_count == 2
+    assert track.coverage_point_count == 4
+    assert track.mean_confidence == pytest.approx(0.75)
+    assert validate_continuity(track) == ()
 
 
 def test_long_gap_splits_track_and_emits_continuity_warning() -> None:

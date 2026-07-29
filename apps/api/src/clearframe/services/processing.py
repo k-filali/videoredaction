@@ -516,12 +516,17 @@ class ProcessingService:
         tracker = IoUTracker(
             iou_threshold=0.3,
             max_gap=max(2, sample_every_frames * 2),
+            materialize_interpolated=False,
         )
         tracks = tracker.track(tracking_proposals)
         elapsed_ms = (perf_counter() - started) * 1000
         detection_classes = Counter(item.proposal.class_name for item in observations)
         detector_counts = Counter(item.registry_id for item in observations)
         keyframe_count = sum(len(track.points) for track in tracks)
+        interpolated_track_points = sum(
+            track.interpolated_point_count for track in tracks
+        )
+        track_coverage_points = sum(track.coverage_point_count for track in tracks)
         metrics: dict[str, object] = {
             "frames_decoded": frames_decoded,
             "frames_sampled": frames_sampled,
@@ -532,6 +537,9 @@ class ProcessingService:
             "nms_suppressed": sum(item.nms_suppressed for item in observations),
             "tracks": len(tracks),
             "keyframes": keyframe_count,
+            "observed_track_points": keyframe_count,
+            "interpolated_track_points": interpolated_track_points,
+            "track_coverage_points": track_coverage_points,
             "continuity_warnings": len(tracker.warnings),
             "detection_classes": dict(sorted(detection_classes.items())),
             "detector_counts": dict(sorted(detector_counts.items())),
@@ -583,7 +591,11 @@ class ProcessingService:
 
             for detection_track in tracks:
                 track_id = new_id()
-                points = detection_track.points
+                points = tuple(
+                    point
+                    for point in detection_track.points
+                    if not point.is_interpolated
+                )
                 warning = (
                     "; ".join(item.message for item in detection_track.warnings) or None
                 )
@@ -604,12 +616,11 @@ class ProcessingService:
                         "min": min(confidences),
                         "mean": detection_track.mean_confidence,
                         "max": max(confidences),
-                        "observed_points": sum(
-                            not point.is_interpolated for point in points
+                        "observed_points": detection_track.observed_point_count,
+                        "interpolated_points": (
+                            detection_track.interpolated_point_count
                         ),
-                        "interpolated_points": sum(
-                            point.is_interpolated for point in points
-                        ),
+                        "coverage_points": detection_track.coverage_point_count,
                     },
                     warning=warning,
                 )

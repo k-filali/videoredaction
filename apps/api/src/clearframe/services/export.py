@@ -32,7 +32,7 @@ from clearframe.models import (
     VideoAsset,
     new_id,
 )
-from clearframe.rendering import Frame, redact_frame, redactions_at_frame
+from clearframe.rendering import Frame, SequentialRedactionLookup, redact_frame
 from clearframe.services.review import (
     RevisionConflictError,
     append_system_audit_event,
@@ -419,6 +419,7 @@ class ExportService:
             process.kill()
             raise ExportValidationError("renderer pipe could not be created")
 
+        redaction_lookup = SequentialRedactionLookup(snapshot)
         frame_index = 0
         pipe_closed = False
         try:
@@ -428,7 +429,7 @@ class ExportService:
                     break
                 if frame.shape[1] != width or frame.shape[0] != height:
                     raise ExportValidationError("decoded frame dimensions changed")
-                redactions = redactions_at_frame(snapshot, frame_index)
+                redactions = redaction_lookup.at_frame(frame_index)
                 rendered = redact_frame(cast(Frame, frame), redactions, style)
                 self._write_frame(process.stdin, rendered.tobytes())
                 frame_index += 1

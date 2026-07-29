@@ -1,3 +1,4 @@
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from clearframe.pipeline import (
     OpenCVYuNetFaceDetector,
 )
 from clearframe.pipeline.detection import Frame
+from clearframe.rendering import box_at_frame
 from clearframe.services.processing import (
     DetectorSelectionError,
     ProcessingConflictError,
@@ -100,7 +102,40 @@ def test_mock_processing_persists_run_detections_and_tracks(tmp_path: Path) -> N
             assert session.scalar(
                 select(func.count(Track.id)).where(Track.model_run_id == run.id)
             ) == 1
-            assert (session.scalar(select(func.count(TrackKeyframe.id))) or 0) > 1
+            keyframes = list(
+                session.scalars(
+                    select(TrackKeyframe)
+                    .where(TrackKeyframe.track_id == track.id)
+                    .order_by(TrackKeyframe.frame_index)
+                )
+            )
+            assert len(keyframes) > 1
+            assert len(keyframes) == run.metrics["keyframes"]
+            assert len(keyframes) == run.metrics["observed_track_points"]
+            virtual_interpolated = sum(
+                current.frame_index - previous.frame_index - 1
+                for previous, current in pairwise(keyframes)
+            )
+            assert virtual_interpolated > 0
+            assert virtual_interpolated == run.metrics["interpolated_track_points"]
+            assert (
+                len(keyframes) + virtual_interpolated
+                == run.metrics["track_coverage_points"]
+            )
+            assert track.confidence_summary["observed_points"] == len(keyframes)
+            assert (
+                track.confidence_summary["interpolated_points"]
+                == virtual_interpolated
+            )
+            gap_start, _ = next(
+                (previous, current)
+                for previous, current in pairwise(keyframes)
+                if current.frame_index - previous.frame_index > 1
+            )
+            virtual_frame = gap_start.frame_index + 1
+            assert all(item.frame_index != virtual_frame for item in keyframes)
+            snapshot = build_review_snapshot(session, video_id)
+            assert box_at_frame(snapshot.tracks[track.id], virtual_frame) is not None
             assert requested.job.status == JobStatus.QUEUED
     finally:
         runner.shutdown()

@@ -8,7 +8,12 @@ from clearframe.domain.review import (
     ReviewSnapshot,
     TrackReviewState,
 )
-from clearframe.rendering import box_at_frame, redact_frame, redactions_at_frame
+from clearframe.rendering import (
+    SequentialRedactionLookup,
+    box_at_frame,
+    redact_frame,
+    redactions_at_frame,
+)
 
 
 def build_track(*, redacted: bool = True, active: bool = True) -> TrackReviewState:
@@ -62,6 +67,55 @@ def test_black_box_changes_every_pixel_inside_and_none_outside() -> None:
 
     assert np.all(rendered[30:50, 20:40] == 0)
     assert np.array_equal(rendered[:20, :20], frame[:20, :20])
+
+
+def test_sequential_lookup_compiles_keyframes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    track = build_track()
+    track.keyframes.reverse()
+    snapshot = ReviewSnapshot(
+        video_id="video",
+        revision=0,
+        tracks={"plate-track": track},
+    )
+    expected = [
+        redactions_at_frame(snapshot, frame_index, padding={"license_plate": 0.0})
+        for frame_index in range(11)
+    ]
+    lookup = SequentialRedactionLookup(
+        snapshot,
+        padding={"license_plate": 0.0},
+    )
+
+    def fail_if_sorted_again(_: TrackReviewState) -> list[ReviewKeyframe]:
+        raise AssertionError("compiled keyframes were sorted again")
+
+    monkeypatch.setattr("clearframe.rendering._visible_keyframes", fail_if_sorted_again)
+
+    assert [lookup.at_frame(frame_index) for frame_index in range(11)] == expected
+    with pytest.raises(ValueError, match="cannot move backward"):
+        lookup.at_frame(9)
+
+
+def test_sequential_lookup_tracks_active_spans_in_snapshot_order() -> None:
+    late = build_track()
+    late.track_id = "late"
+    late.start_frame = 5
+    late.start_ms = 500
+    late.keyframes = [keyframe for keyframe in late.keyframes if keyframe.frame_index >= 5]
+    early = build_track()
+    early.track_id = "early"
+    snapshot = ReviewSnapshot(
+        video_id="video",
+        revision=0,
+        tracks={"late": late, "early": early},
+    )
+    lookup = SequentialRedactionLookup(snapshot)
+
+    assert [item.track_id for item in lookup.at_frame(0)] == ["early"]
+    assert [item.track_id for item in lookup.at_frame(5)] == ["late", "early"]
+    assert lookup.at_frame(11) == []
 
 
 def test_all_rendering_styles_modify_the_target_region() -> None:

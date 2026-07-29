@@ -30,6 +30,7 @@ class DetectionTrack:
     class_name: str
     points: tuple[TrackPoint, ...]
     warnings: tuple[ContinuityWarning, ...] = ()
+    interpolates_gaps: bool = False
 
     @property
     def start_frame(self) -> int:
@@ -41,7 +42,38 @@ class DetectionTrack:
 
     @property
     def mean_confidence(self) -> float:
-        return sum(point.confidence for point in self.points) / len(self.points)
+        if not self.interpolates_gaps:
+            return sum(point.confidence for point in self.points) / len(self.points)
+
+        confidence_sum = self.points[0].confidence
+        coverage = 1
+        for previous, current in zip(self.points, self.points[1:], strict=False):
+            distance = current.frame_index - previous.frame_index
+            confidence_sum += (
+                distance * previous.confidence
+                + (current.confidence - previous.confidence) * (distance + 1) / 2
+            )
+            coverage += distance
+        return confidence_sum / coverage
+
+    @property
+    def observed_point_count(self) -> int:
+        return sum(not point.is_interpolated for point in self.points)
+
+    @property
+    def interpolated_point_count(self) -> int:
+        materialized = sum(point.is_interpolated for point in self.points)
+        if not self.interpolates_gaps:
+            return materialized
+        virtual = sum(
+            max(0, current.frame_index - previous.frame_index - 1)
+            for previous, current in zip(self.points, self.points[1:], strict=False)
+        )
+        return materialized + virtual
+
+    @property
+    def coverage_point_count(self) -> int:
+        return self.observed_point_count + self.interpolated_point_count
 
 
 @dataclass(slots=True)
@@ -73,15 +105,22 @@ def _detection_sort_key(
 
 class IoUTracker:
     name = "deterministic_iou"
-    version = "1.0"
+    version = "1.1"
 
-    def __init__(self, *, iou_threshold: float = 0.3, max_gap: int = 2) -> None:
+    def __init__(
+        self,
+        *,
+        iou_threshold: float = 0.3,
+        max_gap: int = 2,
+        materialize_interpolated: bool = True,
+    ) -> None:
         if not 0.0 < iou_threshold <= 1.0:
             raise ValueError("iou_threshold must be greater than zero and at most one")
         if max_gap < 0:
             raise ValueError("max_gap cannot be negative")
         self.iou_threshold = iou_threshold
         self.max_gap = max_gap
+        self.materialize_interpolated = materialize_interpolated
         self.reset()
 
     def reset(self) -> None:
@@ -188,21 +227,22 @@ class IoUTracker:
         previous = state.last_point
         frame_distance = detection.frame_index - previous.frame_index
         appended: list[TrackPoint] = []
-        for offset in range(1, frame_distance):
-            progress = offset / frame_distance
-            point = TrackPoint(
-                frame_index=previous.frame_index + offset,
-                timestamp_ms=round(
-                    previous.timestamp_ms
-                    + (detection.timestamp_ms - previous.timestamp_ms) * progress
-                ),
-                bbox=previous.bbox.interpolate(detection.bbox, progress),
-                confidence=previous.confidence
-                + (detection.confidence - previous.confidence) * progress,
-                is_interpolated=True,
-            )
-            state.points.append(point)
-            appended.append(point)
+        if self.materialize_interpolated:
+            for offset in range(1, frame_distance):
+                progress = offset / frame_distance
+                point = TrackPoint(
+                    frame_index=previous.frame_index + offset,
+                    timestamp_ms=round(
+                        previous.timestamp_ms
+                        + (detection.timestamp_ms - previous.timestamp_ms) * progress
+                    ),
+                    bbox=previous.bbox.interpolate(detection.bbox, progress),
+                    confidence=previous.confidence
+                    + (detection.confidence - previous.confidence) * progress,
+                    is_interpolated=True,
+                )
+                state.points.append(point)
+                appended.append(point)
         observed = TrackPoint(
             frame_index=detection.frame_index,
             timestamp_ms=detection.timestamp_ms,
@@ -254,6 +294,7 @@ class IoUTracker:
             class_name=state.class_name,
             points=tuple(state.points),
             warnings=warnings,
+            interpolates_gaps=not self.materialize_interpolated,
         )
 
 
@@ -264,6 +305,8 @@ def validate_continuity(
 ) -> tuple[ContinuityWarning, ...]:
     if allowed_gap < 0:
         raise ValueError("allowed_gap cannot be negative")
+    if track.interpolates_gaps:
+        return ()
     warnings: list[ContinuityWarning] = []
     for previous, current in zip(track.points, track.points[1:], strict=False):
         missing = current.frame_index - previous.frame_index - 1
