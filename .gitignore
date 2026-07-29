@@ -2,6 +2,14 @@
 .env
 .env.*
 !.env.example
+secrets/
+credentials/
+credentials.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.kdbx
 
 # Python
 .venv/
@@ -44,9 +52,34 @@ ml/artifacts/
 *.pth
 *.ckpt
 
+# Raw media
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.avi
+*.m4v
+*.mpeg
+*.mpg
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.flac
+
+# Backups and exports
+*.bak
+*.backup
+*.dump
+*.sql
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
 # IDE and OS
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
-

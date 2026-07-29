@@ -42,7 +42,13 @@ jobs:
   container:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CLEARFRAME_ACCESS_TOKEN: ci-smoke-only
     steps:
       - uses: actions/checkout@v4
       - run: docker compose config --quiet
       - run: docker compose build
+      - run: docker compose up --detach --wait --wait-timeout 120
+      - run: curl --fail --silent --show-error http://127.0.0.1:5173/api/ready
+      - if: always()
+        run: docker compose down --volumes

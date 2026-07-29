@@ -12,7 +12,7 @@ RUN pnpm --dir apps/web build
 
 FROM nginx:1.29-alpine
 
-COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+COPY docker/nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /workspace/apps/web/dist /usr/share/nginx/html
 
 EXPOSE 8080

@@ -8,10 +8,11 @@ services:
     environment:
       CLEARFRAME_ENV: demo
       CLEARFRAME_API_HOST: 0.0.0.0
-      CLEARFRAME_ACCESS_TOKEN: compose-local-only
+      CLEARFRAME_ACCESS_TOKEN: ${CLEARFRAME_ACCESS_TOKEN:?Set CLEARFRAME_ACCESS_TOKEN before starting ClearFrame}
       CLEARFRAME_DATABASE_URL: sqlite:////app/data/clearframe.db
       CLEARFRAME_STORAGE_ROOT: /app/storage
       CLEARFRAME_WEB_ORIGIN: http://localhost:5173
+      CLEARFRAME_BUILD_ID: ${CLEARFRAME_BUILD_ID:-local-compose}
     volumes:
       - clearframe-data:/app/data
       - clearframe-storage:/app/storage
@@ -20,11 +21,20 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=3)"
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 512
+    init: true
     restart: unless-stopped
 
   web:
@@ -34,8 +44,31 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    environment:
+      CLEARFRAME_ACCESS_TOKEN: ${CLEARFRAME_ACCESS_TOKEN:?Set CLEARFRAME_ACCESS_TOKEN before starting ClearFrame}
     ports:
       - "127.0.0.1:5173:8080"
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - http://127.0.0.1:8080/
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /etc/nginx/conf.d:rw,noexec,nosuid,nodev,size=1m
+      - /var/cache/nginx:rw,noexec,nosuid,nodev,size=16m
+      - /var/run:rw,noexec,nosuid,nodev,size=1m
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    init: true
     restart: unless-stopped
 
 volumes:
