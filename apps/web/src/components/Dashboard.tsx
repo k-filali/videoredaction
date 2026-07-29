@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, api, mediaUrl, uploadVideo } from "../api";
 import { formatTime, humanFileSize } from "../lib/geometry";
-import type { VideoAsset } from "../types";
+import type { ProcessingJob, VideoAsset, VideoStatusResponse } from "../types";
 import { Brand, PrivacyStatus } from "./Brand";
 import { Icon } from "./Icon";
 
@@ -16,6 +16,7 @@ interface ActiveUpload {
   size: number;
   progress: number;
   stage: "uploading" | "processing";
+  detail?: string;
 }
 
 const workingStatuses = new Set([
@@ -46,13 +47,24 @@ function formatDate(value: string): string {
   return date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 }
 
+function activeJob(status: VideoStatusResponse): ProcessingJob | undefined {
+  return status.jobs.find((job) => job.status === "RUNNING" || job.status === "QUEUED");
+}
+
+function stageLabel(stage: string): string {
+  if (!stage) return "Preparing video";
+  return stage.charAt(0).toUpperCase() + stage.slice(1);
+}
+
 function VideoCard({
   video,
+  job,
   onOpen,
   onDetect,
   detecting,
 }: {
   video: VideoAsset;
+  job?: ProcessingJob;
   onOpen: (video: VideoAsset) => void;
   onDetect: (video: VideoAsset) => void;
   detecting: boolean;
@@ -66,8 +78,9 @@ function VideoCard({
     video.active_model_run_id === null &&
     video.review_revision === 0;
   const working = workingStatuses.has(video.status) || detecting;
-  const progressHint =
-    video.status === "VALIDATING"
+  const progressHint = job
+    ? Math.max(2, Math.round(job.progress * 100))
+    : video.status === "VALIDATING"
       ? 24
       : video.status === "PROXYING"
         ? 51
@@ -76,6 +89,9 @@ function VideoCard({
           : video.status === "EXPORTING"
             ? 88
             : 12;
+  const progressCopy = job
+    ? `${stageLabel(job.stage)} · ${Math.round(job.progress * 100)}%`
+    : "Preparing a private review copy…";
 
   return (
     <article className="case-card">
@@ -126,7 +142,7 @@ function VideoCard({
             <div className="progress-line">
               <span style={{ width: `${progressHint}%` }} />
             </div>
-            <span>Preparing a private review copy…</span>
+            <span>{progressCopy}</span>
           </div>
         ) : video.status === "FAILED" ? (
           <p className="case-error">{video.error_message ?? "Processing could not be completed."}</p>
@@ -168,6 +184,7 @@ export function Dashboard({ onOpenVideo, onNotify }: DashboardProps) {
   const [dragging, setDragging] = useState(false);
   const [query, setQuery] = useState("");
   const [detectingIds, setDetectingIds] = useState<Set<string>>(new Set());
+  const [jobsByVideo, setJobsByVideo] = useState<Record<string, ProcessingJob>>({});
   const inputRef = useRef<HTMLInputElement>(null);
   const uploadBusyRef = useRef(false);
 
@@ -175,7 +192,24 @@ export function Dashboard({ onOpenVideo, onNotify }: DashboardProps) {
     if (!quiet) setLoading(true);
     try {
       const response = await api.listVideos();
-      setVideos(response.items);
+      const working = response.items.filter((video) => workingStatuses.has(video.status));
+      const settled = await Promise.allSettled(
+        working.map((video) => api.getVideoStatus(video.id)),
+      );
+      const statuses = settled.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : [],
+      );
+      const refreshed = new Map(statuses.map((status) => [status.video.id, status.video]));
+      setVideos(response.items.map((video) => refreshed.get(video.id) ?? video));
+      setJobsByVideo((current) => {
+        const next = { ...current };
+        for (const status of statuses) {
+          const job = activeJob(status);
+          if (job) next[status.video.id] = job;
+          else delete next[status.video.id];
+        }
+        return next;
+      });
       setLoadError(null);
     } catch (error) {
       if (!quiet) setLoadError(error instanceof Error ? error.message : "Could not load videos");
@@ -200,6 +234,22 @@ export function Dashboard({ onOpenVideo, onNotify }: DashboardProps) {
     while (true) {
       const status = await api.getVideoStatus(videoId);
       const latest = status.video;
+      const job = activeJob(status);
+      setJobsByVideo((current) => {
+        if (job) return { ...current, [videoId]: job };
+        const next = { ...current };
+        delete next[videoId];
+        return next;
+      });
+      setUpload((current) =>
+        current?.stage === "processing"
+          ? {
+              ...current,
+              progress: job?.progress ?? current.progress,
+              detail: job ? stageLabel(job.stage) : current.detail,
+            }
+          : current,
+      );
       setVideos((current) => [
         latest,
         ...current.filter((item) => item.id !== latest.id),
@@ -272,7 +322,16 @@ export function Dashboard({ onOpenVideo, onNotify }: DashboardProps) {
           accepted.video,
           ...current.filter((item) => item.id !== accepted.video.id),
         ]);
-        setUpload((current) => (current ? { ...current, stage: "processing" } : current));
+        setUpload((current) =>
+          current
+            ? {
+                ...current,
+                stage: "processing",
+                progress: accepted.job.progress,
+                detail: stageLabel(accepted.job.stage),
+              }
+            : current,
+        );
         onNotify("Upload secured. Preparing proxy and detection.", "success");
         await prepareForReview(accepted.video.id);
         setUpload(null);
@@ -370,7 +429,7 @@ export function Dashboard({ onOpenVideo, onNotify }: DashboardProps) {
                   <strong>{upload.name}</strong>
                   <span>
                     {upload.stage === "processing"
-                      ? "Upload complete · securing and validating"
+                      ? `${upload.detail ?? "Preparing video"} · ${Math.round(upload.progress * 100)}%`
                       : `${Math.round(upload.progress * 100)}% · ${humanFileSize(upload.size)}`}
                   </span>
                 </div>
@@ -444,6 +503,7 @@ export function Dashboard({ onOpenVideo, onNotify }: DashboardProps) {
               {filteredVideos.map((video) => (
                 <VideoCard
                   video={video}
+                  job={jobsByVideo[video.id]}
                   onOpen={onOpenVideo}
                   onDetect={(item) => void runDetection(item)}
                   detecting={detectingIds.has(video.id)}
