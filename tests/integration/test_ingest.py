@@ -13,6 +13,7 @@ from clearframe.domain.enums import JobStatus, VideoStatus
 from clearframe.main import create_app
 from clearframe.media import (
     MediaError,
+    MediaMetadata,
     MediaProcessor,
     UnsupportedMediaError,
     sha256_file,
@@ -104,10 +105,26 @@ def test_decode_failure_cleans_temporary_artifacts(tmp_path: Path) -> None:
     services.runner.shutdown()
 
 
-def test_ingest_preserves_original_and_rejects_duplicates(tmp_path: Path) -> None:
+def test_ingest_preserves_original_and_rejects_duplicates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     database, services = build_services(tmp_path)
     source = generate_test_video(tmp_path / "upload.mp4", services.media)
     original_checksum = sha256_file(source)
+    received_proxy_metadata: list[MediaMetadata | None] = []
+    generate_proxy = services.media.generate_proxy
+
+    def record_generate_proxy(
+        source_path: Path,
+        destination_path: Path,
+        *,
+        metadata: MediaMetadata | None = None,
+    ) -> None:
+        received_proxy_metadata.append(metadata)
+        generate_proxy(source_path, destination_path, metadata=metadata)
+
+    monkeypatch.setattr(services.media, "generate_proxy", record_generate_proxy)
 
     async def accept() -> tuple[str, str]:
         with source.open("rb") as stream:
@@ -118,6 +135,10 @@ def test_ingest_preserves_original_and_rejects_duplicates(tmp_path: Path) -> Non
 
     video_id, job_id = asyncio.run(accept())
     services.runner.wait(job_id, timeout=120)
+
+    assert len(received_proxy_metadata) == 1
+    assert received_proxy_metadata[0] is not None
+    assert received_proxy_metadata[0].codec == "h264"
 
     with database.session() as session:
         video = session.get(VideoAsset, video_id)

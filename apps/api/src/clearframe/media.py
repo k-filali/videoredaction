@@ -230,39 +230,95 @@ class MediaProcessor:
             ffmpeg_version=self.ffmpeg_version,
         )
 
-    def generate_proxy(self, source: Path, destination: Path) -> None:
+    @staticmethod
+    def _can_remux_proxy(metadata: MediaMetadata) -> bool:
+        return (
+            metadata.codec.casefold() == "h264"
+            and metadata.width <= 1280
+            and metadata.height <= 720
+        )
+
+    @staticmethod
+    def _proxy_remux_arguments(source: Path, destination: Path) -> list[str]:
+        return [
+            "-y",
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ]
+
+    @staticmethod
+    def _proxy_transcode_arguments(source: Path, destination: Path) -> list[str]:
+        return [
+            "-y",
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-vf",
+            "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ]
+
+    def generate_proxy(
+        self,
+        source: Path,
+        destination: Path,
+        *,
+        metadata: MediaMetadata | None = None,
+    ) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
+        source_metadata = metadata or self.probe(source)
+        if self._can_remux_proxy(source_metadata):
+            try:
+                self._run(
+                    self._proxy_remux_arguments(source, destination),
+                    timeout=14400,
+                    failure_message="proxy remux failed",
+                )
+                self.probe(destination)
+                return
+            except MediaError:
+                destination.unlink(missing_ok=True)
+
         self._run(
-            [
-                "-y",
-                "-v",
-                "error",
-                "-protocol_whitelist",
-                "file,pipe",
-                "-i",
-                str(source),
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a:0?",
-                "-vf",
-                "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "23",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-movflags",
-                "+faststart",
-                str(destination),
-            ],
+            self._proxy_transcode_arguments(source, destination),
             timeout=14400,
             failure_message="proxy generation failed",
         )

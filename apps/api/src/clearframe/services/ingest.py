@@ -222,7 +222,11 @@ class IngestService:
 
         context.update(0.35, "generating review proxy")
         proxy_uri = self.storage.proxy_uri(video_id)
-        self.media.generate_proxy(original_path, self.storage.prepare(proxy_uri))
+        self.media.generate_proxy(
+            original_path,
+            self.storage.prepare(proxy_uri),
+            metadata=metadata,
+        )
 
         context.update(0.88, "generating thumbnail")
         thumbnail_uri = self.storage.thumbnail_uri(video_id)
