@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from tests.helpers import MOCK_MODEL_REGISTRY_PATH, generate_test_video
 
 from clearframe.database import Database
-from clearframe.domain.enums import JobStatus, RunStatus, VideoStatus
+from clearframe.domain.enums import JobStatus, JobType, RunStatus, VideoStatus
 from clearframe.domain.geometry import NormalizedBox
 from clearframe.jobs import LocalJobRunner
 from clearframe.media import MediaProcessor
@@ -79,6 +79,7 @@ def _build_processing(
 
 def test_mock_processing_persists_run_detections_and_tracks(tmp_path: Path) -> None:
     database, _, runner, service, video_id = _build_processing(tmp_path)
+    runner.register(JobType.DETECT, service.execute)
     try:
         requested = service.request(video_id, sample_every_frames=3)
         runner.wait(requested.job.id, timeout=60)
@@ -262,6 +263,7 @@ def test_processing_bounds_frames_and_consumes_results_in_order(
         runner,
         detector,
     )
+    runner.register(JobType.DETECT, service.execute)
     consumed_frames: list[int] = []
     def recording_nms(
         proposals: Iterable[DetectionProposal],
@@ -312,6 +314,7 @@ def test_processing_drains_detector_workers_after_failure(tmp_path: Path) -> Non
         runner,
         detector,
     )
+    runner.register(JobType.DETECT, service.execute)
     try:
         requested = service.request(video_id, sample_every_frames=1)
         runner.wait(requested.job.id, timeout=60)
@@ -373,6 +376,7 @@ def test_nms_preserves_raw_detections_and_only_filters_tracking(tmp_path: Path) 
         runner,
         registry_path=MOCK_MODEL_REGISTRY_PATH,
     )
+    runner.register(JobType.DETECT, service.execute)
     try:
         requested = service.request(video_id, sample_every_frames=3)
         runner.wait(requested.job.id, timeout=60)
@@ -404,6 +408,7 @@ def test_nms_preserves_raw_detections_and_only_filters_tracking(tmp_path: Path) 
 
 def test_repeat_run_replaces_review_scope_until_review_starts(tmp_path: Path) -> None:
     database, _, runner, service, video_id = _build_processing(tmp_path)
+    runner.register(JobType.DETECT, service.execute)
     try:
         first = service.request(video_id, sample_every_frames=3)
         runner.wait(first.job.id, timeout=60)

@@ -34,6 +34,7 @@ dev = [
 
 [project.scripts]
 clearframe-api = "clearframe.main:run"
+clearframe-worker = "clearframe.worker:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["apps/api/src/clearframe"]

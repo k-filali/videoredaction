@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 
 from clearframe.database import Database
 from clearframe.domain.enums import JobType, VideoStatus
-from clearframe.jobs import JobContext, LocalJobRunner
+from clearframe.jobs import JobContext, JobDispatcher
 from clearframe.media import MediaError, MediaKind, MediaProcessor, sha256_file, sniff_media
 from clearframe.models import ProcessingJob, VideoAsset, new_id
 from clearframe.storage import LocalStorage, sanitize_filename
@@ -44,7 +44,7 @@ class IngestService:
         database: Database,
         storage: LocalStorage,
         media: MediaProcessor,
-        runner: LocalJobRunner,
+        runner: JobDispatcher,
         max_upload_mb: int,
     ) -> None:
         self.database = database
@@ -127,7 +127,15 @@ class IngestService:
                 video_id=video_id,
                 job_type=JobType.INGEST,
                 stage="queued",
-                payload={"temporary_uri": temporary_uri},
+                payload={
+                    "temporary_uri": temporary_uri,
+                    "expected_checksum": checksum,
+                    "media_kind": {
+                        "container": media_kind.container,
+                        "extension": media_kind.extension,
+                        "content_type": media_kind.content_type,
+                    },
+                },
             )
             session.add(video)
             session.flush()
@@ -144,17 +152,46 @@ class IngestService:
                     raise DuplicateVideoError(existing.id) from exc
                 raise IngestError("video record could not be created") from exc
 
-        self.runner.submit(
-            job.id,
-            lambda context: self._finalize_with_cleanup(
-                context,
-                video_id=video_id,
-                temporary_uri=temporary_uri,
-                media_kind=media_kind,
-                expected_checksum=checksum,
-            ),
-        )
+        self.runner.enqueue(job.id)
         return AcceptedUpload(video=video, job=job)
+
+    def execute(self, context: JobContext, job_id: str) -> None:
+        with self.database.session() as session:
+            job = session.get(ProcessingJob, job_id)
+            if job is None or job.job_type != JobType.INGEST or not job.video_id:
+                raise IngestError("ingest job is invalid")
+            temporary_uri = job.payload.get("temporary_uri")
+            expected_checksum = job.payload.get("expected_checksum")
+            media_payload = job.payload.get("media_kind")
+            video_id = job.video_id
+
+        if (
+            not isinstance(temporary_uri, str)
+            or not isinstance(expected_checksum, str)
+            or not isinstance(media_payload, dict)
+        ):
+            raise IngestError("ingest job payload is invalid")
+        container = media_payload.get("container")
+        extension = media_payload.get("extension")
+        content_type = media_payload.get("content_type")
+        if (
+            not isinstance(container, str)
+            or not isinstance(extension, str)
+            or not isinstance(content_type, str)
+        ):
+            raise IngestError("ingest media payload is invalid")
+
+        self._finalize_with_cleanup(
+            context,
+            video_id=video_id,
+            temporary_uri=temporary_uri,
+            media_kind=MediaKind(
+                container=container,
+                extension=extension,
+                content_type=content_type,
+            ),
+            expected_checksum=expected_checksum,
+        )
 
     def _finalize_with_cleanup(
         self,

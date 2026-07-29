@@ -107,6 +107,7 @@ def proxy_job(database: Database, video_id: str) -> ProcessingJob:
 def test_reconcile_replaces_legacy_upscale_without_losing_tracks(tmp_path: Path) -> None:
     database, storage, media, runner, video_id, proxy_uri = build_legacy_proxy(tmp_path)
     service = ProxyService(database, storage, media, runner)
+    runner.register(JobType.PROXY, service.execute)
     original_path = storage.path_for(storage.original_uri(video_id, ".mp4"))
     original_hash = sha256_file(original_path)
 
@@ -140,6 +141,7 @@ def test_failed_repair_keeps_existing_proxy_and_ready_video(
 ) -> None:
     database, storage, media, runner, video_id, proxy_uri = build_legacy_proxy(tmp_path)
     service = ProxyService(database, storage, media, runner)
+    runner.register(JobType.PROXY, service.execute)
     proxy_path = storage.path_for(proxy_uri)
     proxy_hash = sha256_file(proxy_path)
 

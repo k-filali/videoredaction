@@ -23,7 +23,7 @@ from clearframe.domain.enums import (
     TrackStatus,
     VideoStatus,
 )
-from clearframe.jobs import JobContext, LocalJobRunner
+from clearframe.jobs import JobContext, JobDispatcher
 from clearframe.model_registry import (
     DEFAULT_REGISTRY_PATH,
     AdapterKind,
@@ -163,12 +163,22 @@ def _detector_version(binding: _DetectorBinding) -> dict[str, str]:
     return metadata
 
 
+def _pending_detector_version(entry: ModelEntry) -> dict[str, str]:
+    return {
+        "adapter": entry.adapter,
+        "adapter_version": entry.adapter_version,
+        "model_version": entry.model_version,
+        "runtime_version": "pending",
+        "device": "pending",
+    }
+
+
 class ProcessingService:
     def __init__(
         self,
         database: Database,
         storage: LocalStorage,
-        runner: LocalJobRunner,
+        runner: JobDispatcher,
         *,
         registry: ModelRegistry | None = None,
         registry_path: Path = DEFAULT_REGISTRY_PATH,
@@ -199,7 +209,7 @@ class ProcessingService:
     ) -> RequestedProcessing:
         if sample_every_frames <= 0:
             raise ProcessingValidationError("sample_every_frames must be positive")
-        bindings = self._select_bindings(model_ids)
+        entries = self._select_entries(model_ids)
 
         with self.database.session() as session:
             video = session.get(VideoAsset, video_id)
@@ -245,17 +255,17 @@ class ProcessingService:
             run = ModelRun(
                 video_id=video_id,
                 detector_versions={
-                    binding.entry.id: _detector_version(binding)
-                    for binding in bindings
+                    entry.id: _pending_detector_version(entry)
+                    for entry in entries
                 },
                 tracker_name=IoUTracker.name,
                 tracker_version=IoUTracker.version,
                 thresholds={
-                    binding.entry.id: binding.entry.thresholds.model_dump(mode="json")
-                    for binding in bindings
+                    entry.id: entry.thresholds.model_dump(mode="json")
+                    for entry in entries
                 },
                 config_hash=self.registry.config_fingerprint,
-                device=_run_device(bindings),
+                device="pending",
                 status=RunStatus.QUEUED,
                 metrics={},
             )
@@ -266,7 +276,7 @@ class ProcessingService:
                 job_type=JobType.DETECT,
                 payload={
                     "model_run_id": run.id,
-                    "model_ids": [binding.entry.id for binding in bindings],
+                    "model_ids": [entry.id for entry in entries],
                     "sample_every_frames": sample_every_frames,
                     "starting_review_revision": starting_review_revision,
                 },
@@ -274,18 +284,39 @@ class ProcessingService:
             session.add(job)
             session.commit()
 
-        self.runner.submit(
-            job.id,
-            lambda context: self._process_guarded(
-                context,
-                video_id=video_id,
-                run_id=run.id,
-                bindings=bindings,
-                sample_every_frames=sample_every_frames,
-                starting_review_revision=starting_review_revision,
-            ),
-        )
+        self.runner.enqueue(job.id)
         return RequestedProcessing(run=run, job=job)
+
+    def execute(self, context: JobContext, job_id: str) -> None:
+        with self.database.session() as session:
+            job = session.get(ProcessingJob, job_id)
+            if job is None or job.job_type != JobType.DETECT or not job.video_id:
+                raise ProcessingValidationError("detection job is invalid")
+            run_id = job.payload.get("model_run_id")
+            model_ids = job.payload.get("model_ids")
+            sample_every_frames = job.payload.get("sample_every_frames")
+            starting_review_revision = job.payload.get("starting_review_revision")
+            video_id = job.video_id
+
+        if (
+            not isinstance(run_id, str)
+            or not isinstance(model_ids, list)
+            or not all(isinstance(model_id, str) for model_id in model_ids)
+            or isinstance(sample_every_frames, bool)
+            or not isinstance(sample_every_frames, int)
+            or isinstance(starting_review_revision, bool)
+            or not isinstance(starting_review_revision, int)
+        ):
+            raise ProcessingValidationError("detection job payload is invalid")
+
+        self._process_guarded(
+            context,
+            video_id=video_id,
+            run_id=run_id,
+            model_ids=cast(list[str], model_ids),
+            sample_every_frames=sample_every_frames,
+            starting_review_revision=starting_review_revision,
+        )
 
     def latest_run(self, video_id: str) -> ModelRun:
         with self.database.session() as session:
@@ -301,7 +332,7 @@ class ProcessingService:
             session.expunge(run)
             return run
 
-    def _select_bindings(self, requested_ids: list[str] | None) -> tuple[_DetectorBinding, ...]:
+    def _select_entries(self, requested_ids: list[str] | None) -> tuple[ModelEntry, ...]:
         enabled = {
             entry.id: entry
             for entry in self.registry.enabled_models
@@ -321,12 +352,15 @@ class ProcessingService:
         if not selected_ids:
             raise DetectorSelectionError("no enabled detectors were selected")
 
+        return tuple(enabled[model_id] for model_id in selected_ids)
+
+    def _select_bindings(self, requested_ids: list[str] | None) -> tuple[_DetectorBinding, ...]:
         bindings = tuple(
             _DetectorBinding(
-                entry=enabled[model_id],
-                detector=self._build_detector(enabled[model_id]),
+                entry=entry,
+                detector=self._build_detector(entry),
             )
-            for model_id in selected_ids
+            for entry in self._select_entries(requested_ids)
         )
         unavailable = [
             f"{binding.entry.id}: {binding.detector.availability.reason or 'unavailable'}"
@@ -413,11 +447,12 @@ class ProcessingService:
         *,
         video_id: str,
         run_id: str,
-        bindings: tuple[_DetectorBinding, ...],
+        model_ids: list[str],
         sample_every_frames: int,
         starting_review_revision: int,
     ) -> None:
         try:
+            bindings = self._select_bindings(model_ids)
             self._process(
                 context,
                 video_id=video_id,
@@ -451,8 +486,17 @@ class ProcessingService:
             run = session.get(ModelRun, run_id)
             if video is None or run is None or not video.proxy_uri:
                 raise ProcessingNotFoundError("processing input disappeared")
+            if run.config_hash != self.registry.config_fingerprint:
+                raise ProcessingValidationError(
+                    "model registry changed after detection was queued"
+                )
             proxy_uri = video.proxy_uri
             fallback_fps = video.fps or 0.0
+            run.detector_versions = {
+                binding.entry.id: _detector_version(binding)
+                for binding in bindings
+            }
+            run.device = _run_device(bindings)
             run.status = RunStatus.RUNNING
             run.started_at = utc_now()
             session.commit()

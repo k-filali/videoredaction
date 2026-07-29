@@ -369,6 +369,7 @@ def test_reprocessing_persists_bounded_suggestions_without_mutating_truth(
         window_seconds=1,
         prefer_csrt=False,
     )
+    runner.register(JobType.REPROCESS, service.execute)
     with database.session() as session:
         original_action = session.get(ReviewAction, action.id)
         original_track = session.get(Track, "proposal-track")
@@ -511,6 +512,7 @@ def test_reprocessing_discards_suggestions_when_manual_source_is_undone(
         window_seconds=1,
         prefer_csrt=False,
     )
+    runner.register(JobType.REPROCESS, service.execute)
     started, resume = _pause_fallback(service, monkeypatch)
     try:
         requested = service.request(action.id)
@@ -562,6 +564,7 @@ def test_reprocessing_discards_suggestions_when_seed_geometry_is_superseded(
         window_seconds=1,
         prefer_csrt=False,
     )
+    runner.register(JobType.REPROCESS, service.execute)
     started, resume = _pause_fallback(service, monkeypatch)
     try:
         requested = service.request(action.id)
@@ -644,6 +647,7 @@ def test_manual_region_uses_static_fallback_within_declared_span(tmp_path: Path)
         window_seconds=1,
         prefer_csrt=False,
     )
+    runner.register(JobType.REPROCESS, service.execute)
     try:
         requested = service.request(action.id)
         runner.wait(requested.job.id, timeout=60)

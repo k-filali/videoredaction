@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from clearframe.database import Database
 from clearframe.domain.enums import JobStatus, JobType
-from clearframe.jobs import JobContext, LocalJobRunner, utc_now
+from clearframe.jobs import JobContext, JobDispatcher, utc_now
 from clearframe.media import (
     PROXY_PROFILE_VERSION,
     MediaMetadata,
@@ -36,7 +36,7 @@ class ProxyService:
         database: Database,
         storage: LocalStorage,
         media: MediaProcessor,
-        runner: LocalJobRunner,
+        runner: JobDispatcher,
     ) -> None:
         self.database = database
         self.storage = storage
@@ -174,15 +174,26 @@ class ProxyService:
             job_id=job.id,
             reasons=assessment.reasons,
         )
-        self.runner.submit(
-            job.id,
-            lambda context: self._repair_with_tracking(
-                context,
-                video_id=video_id,
-                job_id=job.id,
-            ),
-        )
+        self.runner.enqueue(job.id)
         return "scheduled"
+
+    def execute(self, context: JobContext, job_id: str) -> None:
+        with self.database.session() as session:
+            job = session.get(ProcessingJob, job_id)
+            if (
+                job is None
+                or job.job_type != JobType.PROXY
+                or not job.video_id
+                or job.payload.get("action") != "repair"
+            ):
+                raise ProxyRepairError("proxy repair job is invalid")
+            video_id = job.video_id
+
+        self._repair_with_tracking(
+            context,
+            video_id=video_id,
+            job_id=job_id,
+        )
 
     def _record_blocked(
         self,

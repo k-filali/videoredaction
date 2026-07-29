@@ -7,7 +7,7 @@ from tests.helpers import MOCK_MODEL_REGISTRY_PATH, generate_test_video
 
 from clearframe.api.processing import router
 from clearframe.database import Database
-from clearframe.domain.enums import VideoStatus
+from clearframe.domain.enums import JobType, VideoStatus
 from clearframe.jobs import LocalJobRunner
 from clearframe.media import MediaProcessor
 from clearframe.models import VideoAsset
@@ -54,6 +54,7 @@ def test_processing_api_returns_latest_run_and_metrics(tmp_path: Path) -> None:
         runner,
         registry_path=MOCK_MODEL_REGISTRY_PATH,
     )
+    runner.register(JobType.DETECT, app.state.processing_service.execute)
     app.include_router(router)
 
     async def exercise() -> None:

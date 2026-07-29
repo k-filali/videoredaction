@@ -21,7 +21,7 @@ from clearframe.domain.enums import (
 )
 from clearframe.domain.geometry import NormalizedBox
 from clearframe.domain.review import ReviewCommand, ReviewSnapshot, TrackReviewState
-from clearframe.jobs import JobContext, LocalJobRunner
+from clearframe.jobs import JobContext, JobDispatcher
 from clearframe.models import (
     ProcessingJob,
     ReprocessingSuggestion,
@@ -127,7 +127,7 @@ class ReprocessingService:
         self,
         database: Database,
         storage: LocalStorage,
-        runner: LocalJobRunner,
+        runner: JobDispatcher,
         *,
         window_seconds: int = 3,
         prefer_csrt: bool = True,
@@ -183,15 +183,22 @@ class ReprocessingService:
             session.add(job)
             session.commit()
 
-        self.runner.submit(
-            job.id,
-            lambda context: self._run(
-                context,
-                job_id=job.id,
-                source_action_id=source_action_id,
-            ),
-        )
+        self.runner.enqueue(job.id)
         return RequestedReprocessing(job=job, source_action_id=source_action_id)
+
+    def execute(self, context: JobContext, job_id: str) -> None:
+        with self.database.session() as session:
+            job = session.get(ProcessingJob, job_id)
+            if job is None or job.job_type != JobType.REPROCESS:
+                raise ReprocessingValidationError("reprocessing job is invalid")
+            source_action_id = job.payload.get("source_action_id")
+        if not isinstance(source_action_id, str):
+            raise ReprocessingValidationError("reprocessing job payload is invalid")
+        self._run(
+            context,
+            job_id=job_id,
+            source_action_id=source_action_id,
+        )
 
     def suggestions_for_action(
         self,

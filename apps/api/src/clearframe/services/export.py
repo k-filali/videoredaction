@@ -21,7 +21,7 @@ from clearframe.domain.enums import (
     VideoStatus,
 )
 from clearframe.domain.review import ReviewSnapshot
-from clearframe.jobs import JobContext, LocalJobRunner
+from clearframe.jobs import JobContext, JobDispatcher
 from clearframe.media import (
     H264Encoder,
     MediaError,
@@ -88,7 +88,7 @@ class ExportService:
         database: Database,
         storage: LocalStorage,
         media: MediaProcessor,
-        runner: LocalJobRunner,
+        runner: JobDispatcher,
         build_id: str,
     ) -> None:
         self.database = database
@@ -185,14 +185,16 @@ class ExportService:
             video.status = VideoStatus.EXPORTING
             session.commit()
 
-        self.runner.submit(
-            job.id,
-            lambda context: self._render_with_cleanup(
-                context,
-                export_id=export_id,
-            ),
-        )
+        self.runner.enqueue(job.id)
         return RequestedExport(artifact=artifact, job=job)
+
+    def execute(self, context: JobContext, job_id: str) -> None:
+        with self.database.session() as session:
+            job = session.get(ProcessingJob, job_id)
+            if job is None or job.job_type != JobType.EXPORT or not job.export_id:
+                raise ExportValidationError("export job is invalid")
+            export_id = job.export_id
+        self._render_with_cleanup(context, export_id=export_id)
 
     def _render_with_cleanup(self, context: JobContext, *, export_id: str) -> None:
         with self.database.session() as session:

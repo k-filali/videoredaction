@@ -24,7 +24,6 @@ from clearframe.middleware import (
 )
 from clearframe.observability import RequestTraceMiddleware, configure_observability
 from clearframe.services.container import ServiceContainer
-from clearframe.services.processing import ProcessingService
 
 SCHEMA_HEAD = "c7b28f914d62"
 
@@ -64,12 +63,7 @@ def create_app(
     app.state.settings = resolved_settings
     app.state.database = resolved_database
     app.state.services = resolved_services
-    app.state.processing_service = ProcessingService(
-        resolved_database,
-        resolved_services.storage,
-        resolved_services.runner,
-        registry_path=resolved_settings.model_registry_path,
-    )
+    app.state.processing_service = resolved_services.processing
     app.add_middleware(
         UploadLimitMiddleware,
         max_upload_bytes=resolved_settings.max_upload_mb * 1024 * 1024,
