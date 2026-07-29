@@ -7,13 +7,13 @@ source file.
 ## Features
 
 - Streaming video upload with file validation, size limits, checksums, and immutable originals
-- Fast H.264 review proxies and thumbnails generated with FFmpeg
+- Native-resolution H.264 review proxies and thumbnails generated with FFmpeg
 - GPU-accelerated licence-plate and face detection with motion-aware tracking
 - Reviewer controls for accepting, rejecting, moving, resizing, trimming, and creating regions
 - Context suggestions around edited keyframes without overwriting reviewer decisions
 - Pixelated, blurred, or black-box exports rendered from a frozen review revision
 - Append-only review history, export manifests, and output checksum verification
-- A React review workspace with timeline controls, keyboard shortcuts, job progress, and downloads
+- A virtualized React review workspace with smooth native video playback
 
 ## Stack
 
@@ -65,10 +65,11 @@ The default limits allow files up to 2 GiB and videos up to four hours, with a m
 `.env`.
 
 Long videos use the same workflow. Compatible H.264 inputs are remuxed instead of needlessly
-re-encoded, skipped frames avoid full image conversion, and detector work runs on CUDA when
-available. Job stages and real progress percentages are shown during ingest, detection, and export.
-Processing time still varies with duration, frame rate, resolution, codec, and hardware, so rehearse
-representative footage on the presentation machine.
+re-encoded, and proxies are never upscaled beyond the source dimensions. Existing proxies created
+with an older profile are repaired in the background at startup and replaced only after validation.
+Detection skips unsampled frame conversion, bounds concurrent inference, and uses CUDA when
+available. The review workspace uses the browser's video renderer, draws only the active overlays,
+and virtualizes large track collections.
 
 ## Detection
 
@@ -140,6 +141,6 @@ tests/           Unit, integration, and end-to-end tests
 
 - Automatic detection quality varies with camera motion, lighting, occlusion, distance, and plate
   style, so every proposal and uncovered interval still requires review.
-- Jobs run in a local in-process worker pool and are not resumed after an application restart.
+- The included Compose profile uses SQLite, local volumes, and an in-process dispatcher.
 - Uploads are not chunked or resumable.
 - Redaction applies to video frames only. Source audio is copied to the export unchanged.
