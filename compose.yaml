@@ -1,0 +1,43 @@
+name: clearframe
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      CLEARFRAME_ENV: demo
+      CLEARFRAME_API_HOST: 0.0.0.0
+      CLEARFRAME_ACCESS_TOKEN: compose-local-only
+      CLEARFRAME_DATABASE_URL: sqlite:////app/data/clearframe.db
+      CLEARFRAME_STORAGE_ROOT: /app/storage
+      CLEARFRAME_WEB_ORIGIN: http://localhost:5173
+    volumes:
+      - clearframe-data:/app/data
+      - clearframe-storage:/app/storage
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:5173:8080"
+    restart: unless-stopped
+
+volumes:
+  clearframe-data:
+  clearframe-storage:
