@@ -8,7 +8,7 @@ source file.
 
 - Streaming video upload with file validation, size limits, checksums, and immutable originals
 - H.264 review proxies and thumbnails generated with FFmpeg
-- Detector adapters, frame sampling, non-maximum suppression, tracking, and gap interpolation
+- Automatic licence-plate and face detection, tracking, and gap interpolation
 - Reviewer controls for accepting, rejecting, moving, resizing, trimming, and creating regions
 - Context suggestions around edited keyframes without overwriting reviewer decisions
 - Pixelated, blurred, or black-box exports rendered from a frozen review revision
@@ -19,7 +19,7 @@ source file.
 
 - React, TypeScript, and Vite
 - FastAPI, SQLAlchemy, Alembic, and SQLite
-- OpenCV and FFmpeg
+- OpenCV, ONNX Runtime, and FFmpeg
 - Pytest, Ruff, mypy, ESLint, Vitest, and Docker Compose
 
 ## Local setup
@@ -66,12 +66,16 @@ frames, so rehearse representative footage on the machine used for a presentatio
 
 ## Detection
 
-The model registry is stored in `configs/models/registry.yaml`. The enabled detector is a
-deterministic plate-shaped-region detector intended to exercise the review pipeline. OpenCV face and
-plate adapters are included but disabled by default. Use manual regions for arbitrary footage, or
-configure a suitable approved detector before expecting production-quality automatic proposals.
+The default pipeline runs two local CPU models: a YOLOv9-t licence-plate detector and OpenCV YuNet
+for faces. Their weights are included in `configs/models/weights`, verified by SHA-256 at startup,
+and configured in `configs/models/registry.yaml`. Detection samples the review proxy, applies
+class-specific suppression, links detections into tracks, and fills short gaps for review.
 
-Reviewer decisions remain mandatory regardless of the detector used.
+The plate model is distributed by
+[Open Image Models](https://github.com/ankandrew/open-image-models) under the MIT licence. The face
+model is distributed by [OpenCV Zoo](https://github.com/opencv/opencv_zoo) under the MIT licence.
+Reviewer decisions remain mandatory: automatic proposals can still be missed or incorrect on
+unfamiliar footage.
 
 ## Docker
 
@@ -124,7 +128,8 @@ tests/           Unit, integration, and end-to-end tests
 
 ## Current limitations
 
-- Automatic detection quality depends on the configured detector; the default is not a field model.
+- Automatic detection quality varies with camera motion, lighting, occlusion, distance, and plate
+  style, so every proposal and uncovered interval still requires review.
 - Jobs run in a local in-process worker pool and are not resumed after an application restart.
 - Uploads are not chunked or resumable.
 - Redaction applies to video frames only. Source audio is copied to the export unchanged.
