@@ -19,6 +19,39 @@ function incomplete(range?: string): Response {
 }
 
 describe("resumable cloud uploads", () => {
+  it("calls the global fetch with its own receiver by default", async () => {
+    // Native fetch throws "Illegal invocation" when its receiver is not the
+    // global object. Every other test injects a fetcher, so this is the only
+    // coverage of the branch that actually runs in a browser.
+    const receivers: unknown[] = [];
+    const nativeLike = vi.fn(function (this: unknown) {
+      receivers.push(this);
+      if (this !== undefined && this !== globalThis) {
+        throw new TypeError(
+          "Failed to execute 'fetch' on 'Window': Illegal invocation",
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 200 }));
+    });
+    vi.stubGlobal("fetch", nativeLike);
+
+    try {
+      await uploadFileResumable(
+        videoFile(1024),
+        "https://upload.example/session",
+        () => undefined,
+        { sleep: async () => undefined, maxRetries: 1 },
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    expect(nativeLike).toHaveBeenCalledTimes(1);
+    expect(receivers.every((receiver) => receiver === undefined || receiver === globalThis)).toBe(
+      true,
+    );
+  });
+
   it("uploads in fixed 8 MiB chunks and reports committed progress", async () => {
     const file = videoFile(RESUMABLE_CHUNK_SIZE_BYTES * 2 + 1);
     const fetcher = vi

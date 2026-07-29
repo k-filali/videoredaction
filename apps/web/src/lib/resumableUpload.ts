@@ -142,7 +142,11 @@ export async function uploadFileResumable(
     throw new ResumableUploadError("Video is empty");
   }
   const resolved = {
-    fetcher: options.fetcher ?? fetch,
+    // `fetch` must keep its global receiver. Storing the bare reference and
+    // calling it as `resolved.fetcher(...)` rebinds `this` and browsers reject
+    // it with "Illegal invocation".
+    fetcher:
+      options.fetcher ?? ((input, init) => globalThis.fetch(input, init)),
     sleep:
       options.sleep ??
       ((milliseconds: number) =>
