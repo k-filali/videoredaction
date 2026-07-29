@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { ApiError, api, mediaUrl } from "../api";
 import { boxAtFrame, formatTime } from "../lib/geometry";
@@ -97,9 +104,144 @@ function historyStacks(log: AuditLog): { undo: string[]; redo: string[] } {
   return { undo, redo };
 }
 
+const trackRowHeight = 74;
+const trackListOverscan = 5;
+
+interface VirtualTrackListProps {
+  tracks: ReviewTrack[];
+  currentFrame: number;
+  selectedTrackId: string | null;
+  onSelectTrack: (trackId: string) => void;
+}
+
+const VirtualTrackList = memo(function VirtualTrackList({
+  tracks,
+  currentFrame,
+  selectedTrackId,
+  onSelectTrack,
+}: VirtualTrackListProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const scrollTopRef = useRef(0);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(600);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const updateHeight = () =>
+      setViewportHeight((height) =>
+        height === container.clientHeight ? height : container.clientHeight,
+      );
+    updateHeight();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    const selectedIndex = tracks.findIndex(
+      (track) => track.track_id === selectedTrackId,
+    );
+    if (!container || selectedIndex < 0) return;
+    const top = selectedIndex * trackRowHeight;
+    const bottom = top + trackRowHeight;
+    const currentTop = scrollTopRef.current;
+    if (top >= currentTop && bottom <= currentTop + container.clientHeight) return;
+    const nextTop = Math.max(
+      0,
+      top - Math.max(0, (container.clientHeight - trackRowHeight) / 2),
+    );
+    container.scrollTop = nextTop;
+    scrollTopRef.current = nextTop;
+    setScrollTop(nextTop);
+  }, [selectedTrackId, tracks]);
+
+  const startIndex = Math.max(
+    0,
+    Math.floor(scrollTop / trackRowHeight) - trackListOverscan,
+  );
+  const endIndex = Math.min(
+    tracks.length,
+    Math.ceil((scrollTop + viewportHeight) / trackRowHeight) +
+      trackListOverscan,
+  );
+
+  return (
+    <div
+      className="track-list"
+      ref={containerRef}
+      onScroll={(event) => {
+        const nextTop = event.currentTarget.scrollTop;
+        scrollTopRef.current = nextTop;
+        setScrollTop(nextTop);
+      }}
+    >
+      <div
+        className="track-list-virtual"
+        style={{ height: `${tracks.length * trackRowHeight}px` }}
+      >
+        {tracks.slice(startIndex, endIndex).map((track, offset) => {
+          const index = startIndex + offset;
+          const state = trackState(track);
+          const present = boxAtFrame(track, currentFrame) !== null;
+          return (
+            <button
+              className={`track-card track-card-virtual${
+                track.track_id === selectedTrackId ? " is-selected" : ""
+              }${present ? " is-present" : ""}`}
+              type="button"
+              key={track.track_id}
+              style={{ transform: `translateY(${index * trackRowHeight}px)` }}
+              onClick={() => onSelectTrack(track.track_id)}
+              aria-setsize={tracks.length}
+              aria-posinset={index + 1}
+            >
+              <span
+                className="track-colour"
+                style={{
+                  background: classColours[track.class_name] ?? "#8ca9a1",
+                }}
+              />
+              <span className="track-card-main">
+                <span className="track-card-title">
+                  <strong>
+                    {classLabel(track.class_name)} {index + 1}
+                  </strong>
+                  <i className={`track-state state-${state.tone}`}>
+                    {state.label}
+                  </i>
+                </span>
+                <span className="track-card-meta">
+                  {formatTime(track.start_ms)} – {formatTime(track.end_ms)}
+                  {track.confidence !== null && (
+                    <i>{Math.round(track.confidence * 100)}%</i>
+                  )}
+                  {track.source === "MANUAL" && <i>Manual</i>}
+                </span>
+                {track.warning && (
+                  <span className="track-warning">
+                    <Icon name="warning" size={13} />
+                    {track.warning}
+                  </span>
+                )}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+});
+
 export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspaceProps) {
   const playerRef = useRef<VideoCanvasHandle>(null);
   const currentTimeRef = useRef(0);
+  const currentFrameRef = useRef(0);
+  const playingRef = useRef(false);
+  const draftBoxRef = useRef<NormalizedBox | null>(null);
+  const lastPlaybackRenderRef = useRef(0);
   const [video, setVideo] = useState<VideoAsset | null>(null);
   const [snapshot, setSnapshot] = useState<ReviewSnapshot | null>(null);
   const [audit, setAudit] = useState<AuditLog | null>(null);
@@ -135,6 +277,10 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
   const [artifact, setArtifact] = useState<ExportArtifact | null>(null);
   const [undoStack, setUndoStack] = useState<string[]>([]);
   const [redoStack, setRedoStack] = useState<string[]>([]);
+
+  useEffect(() => {
+    draftBoxRef.current = draftBox;
+  }, [draftBox]);
 
   const applySnapshot = useCallback(
     (result: ReviewSnapshot, preferredTrackId?: string | null) => {
@@ -382,8 +528,8 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
           0,
           Math.ceil((Math.max(1, durationMs) * fps) / 1000) - 1,
         );
-        const anchorFrame = Math.min(lastFrame, currentFrame);
-        const timestampMs = Math.round(currentTimeMs);
+        const anchorFrame = Math.min(lastFrame, currentFrameRef.current);
+        const timestampMs = Math.round(currentTimeRef.current);
         const startMs = Math.max(0, Math.min(timestampMs, Math.round(manualStartMs)));
         const endMs = Math.min(
           Math.max(1, durationMs),
@@ -434,8 +580,6 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
       }
     },
     [
-      currentFrame,
-      currentTimeMs,
       durationMs,
       followReprocessing,
       handleMutationFailure,
@@ -714,12 +858,46 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
       setDraftBox(null);
       return;
     }
-    const anchor = Math.round(currentTimeMs);
+    const anchor = Math.round(currentTimeRef.current);
     setManualStartMs(Math.max(0, anchor - 1000));
     setManualEndMs(Math.min(Math.max(1, durationMs), anchor + 1000));
     setManualMode(true);
     setDraftBox(null);
-  }, [currentTimeMs, durationMs, manualMode]);
+  }, [durationMs, manualMode]);
+
+  const handleDraftBoxChange = useCallback((box: NormalizedBox | null) => {
+    draftBoxRef.current = box;
+    setDraftBox(box);
+  }, []);
+
+  const handleTimeChange = useCallback((timeMs: number, frame: number) => {
+    const frameChanged = frame !== currentFrameRef.current;
+    currentTimeRef.current = timeMs;
+    currentFrameRef.current = frame;
+    if (frameChanged && draftBoxRef.current) {
+      draftBoxRef.current = null;
+      setDraftBox(null);
+    }
+
+    const now = performance.now();
+    if (
+      !playingRef.current ||
+      now - lastPlaybackRenderRef.current >= 200
+    ) {
+      lastPlaybackRenderRef.current = now;
+      setCurrentTimeMs(timeMs);
+      setCurrentFrame(frame);
+    }
+  }, []);
+
+  const handlePlayingChange = useCallback((nextPlaying: boolean) => {
+    playingRef.current = nextPlaying;
+    setPlaying(nextPlaying);
+    if (!nextPlaying) {
+      setCurrentTimeMs(currentTimeRef.current);
+      setCurrentFrame(currentFrameRef.current);
+    }
+  }, []);
 
   const applyTrackSpan = useCallback(async () => {
     if (!selectedTrack || !video) return;
@@ -1080,8 +1258,8 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
             </div>
           </div>
 
-          <div className="track-list">
-            {tracks.length === 0 ? (
+          {tracks.length === 0 ? (
+            <div className="track-list">
               <div className="track-list-empty">
                 <Icon name="sparkles" size={22} />
                 <strong>
@@ -1110,7 +1288,9 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
                   </button>
                 )}
               </div>
-            ) : filteredTracks.length === 0 ? (
+            </div>
+          ) : filteredTracks.length === 0 ? (
+            <div className="track-list">
               <div className="track-list-empty">
                 <Icon name="filter" size={22} />
                 <strong>No tracks in this view</strong>
@@ -1118,42 +1298,15 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
                   Clear filters
                 </button>
               </div>
-            ) : (
-              filteredTracks.map((track, index) => {
-                const state = trackState(track);
-                const present = boxAtFrame(track, currentFrame) !== null;
-                return (
-                  <button
-                    className={`track-card${track.track_id === selectedTrackId ? " is-selected" : ""}${
-                      present ? " is-present" : ""
-                    }`}
-                    type="button"
-                    key={track.track_id}
-                    onClick={() => selectTrack(track.track_id)}
-                  >
-                    <span className="track-colour" style={{ background: classColours[track.class_name] ?? "#8ca9a1" }} />
-                    <span className="track-card-main">
-                      <span className="track-card-title">
-                        <strong>{classLabel(track.class_name)} {index + 1}</strong>
-                        <i className={`track-state state-${state.tone}`}>{state.label}</i>
-                      </span>
-                      <span className="track-card-meta">
-                        {formatTime(track.start_ms)} – {formatTime(track.end_ms)}
-                        {track.confidence !== null && <i>{Math.round(track.confidence * 100)}%</i>}
-                        {track.source === "MANUAL" && <i>Manual</i>}
-                      </span>
-                      {track.warning && (
-                        <span className="track-warning">
-                          <Icon name="warning" size={13} />
-                          {track.warning}
-                        </span>
-                      )}
-                    </span>
-                  </button>
-                );
-              })
-            )}
-          </div>
+            </div>
+          ) : (
+            <VirtualTrackList
+              tracks={filteredTracks}
+              currentFrame={currentFrame}
+              selectedTrackId={selectedTrackId}
+              onSelectTrack={selectTrack}
+            />
+          )}
 
           <div className="sidebar-footer">
             <button
@@ -1232,7 +1385,7 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
               showBoxes={showBoxes}
               manualMode={manualMode}
               draftBox={draftBox}
-              onDraftBoxChange={setDraftBox}
+              onDraftBoxChange={handleDraftBoxChange}
               onManualRegion={(box) => void createManualRegion(box)}
               onBoxCommit={(kind, box) => {
                 if (!selectedTrack) return;
@@ -1241,22 +1394,17 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
                   kind === "move" ? "MOVE_REGION" : "RESIZE_REGION",
                   {
                     payload: { bbox: box },
-                    frameIndex: currentFrame,
-                    timestampMs: Math.round(currentTimeMs),
+                    frameIndex: currentFrameRef.current,
+                    timestampMs: Math.round(currentTimeRef.current),
                     reasonCode: "reviewer_adjustment",
                   },
                 );
                 setDraftBox(null);
               }}
               onSelectTrack={selectTrack}
-              onTimeChange={(time, frame) => {
-                if (frame !== currentFrame) setDraftBox(null);
-                currentTimeRef.current = time;
-                setCurrentTimeMs(time);
-                setCurrentFrame(frame);
-              }}
+              onTimeChange={handleTimeChange}
               onDurationChange={setDurationMs}
-              onPlayingChange={setPlaying}
+              onPlayingChange={handlePlayingChange}
               onMediaError={() => setError("The proxy video could not be decoded by this browser.")}
             />
 

@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 
 import { formatTime } from "../lib/geometry";
+import { boundedTrackWindow, sampleKeyframes } from "../lib/reviewPerformance";
 import type { ReprocessingSuggestion, ReviewTrack } from "../types";
 import { Icon } from "./Icon";
 
@@ -19,6 +20,9 @@ const classColours: Record<string, string> = {
   face: "#af98ff",
   scene_text: "#f4b85d",
 };
+
+const maximumTimelineTracks = 60;
+const maximumKeyframeMarkers = 32;
 
 function shortClassName(name: string): string {
   if (name === "license_plate") return "Plate";
@@ -49,6 +53,29 @@ export function Timeline({
     () => suggestions.filter((item) => item.status === "PENDING"),
     [suggestions],
   );
+  const displayTracks = useMemo(
+    () => boundedTrackWindow(tracks, selectedTrackId, maximumTimelineTracks),
+    [selectedTrackId, tracks],
+  );
+  const suggestionsByTrack = useMemo(() => {
+    const grouped = new Map<string, ReprocessingSuggestion[]>();
+    pendingSuggestions.forEach((suggestion) => {
+      const items = grouped.get(suggestion.track_id);
+      if (items) items.push(suggestion);
+      else grouped.set(suggestion.track_id, [suggestion]);
+    });
+    return grouped;
+  }, [pendingSuggestions]);
+  const keyframesByTrack = useMemo(
+    () =>
+      new Map(
+        displayTracks.map((track) => [
+          track.track_id,
+          sampleKeyframes(track.keyframes, maximumKeyframeMarkers),
+        ]),
+      ),
+    [displayTracks],
+  );
 
   const seekFromPointer = (clientX: number) => {
     const element = timelineRef.current;
@@ -63,7 +90,11 @@ export function Timeline({
       <div className="timeline-toolbar">
         <div>
           <span className="timeline-title">Timeline</span>
-          <span className="timeline-count">{tracks.length} visible tracks</span>
+          <span className="timeline-count">
+            {displayTracks.length === tracks.length
+              ? `${tracks.length} visible tracks`
+              : `${displayTracks.length} of ${tracks.length} visible tracks`}
+          </span>
         </div>
         <label className="zoom-control">
           <Icon name="zoom-in" size={15} />
@@ -82,7 +113,7 @@ export function Timeline({
       <div className="timeline-shell">
         <div className="timeline-labels">
           <span className="ruler-spacer">Track</span>
-          {tracks.map((track, index) => (
+          {displayTracks.map((track) => (
             <button
               type="button"
               className={track.track_id === selectedTrackId ? "is-selected" : ""}
@@ -94,7 +125,7 @@ export function Timeline({
               title={track.class_name.replaceAll("_", " ")}
             >
               <i style={{ background: classColours[track.class_name] ?? "#8ca9a1" }} />
-              <span>{shortClassName(track.class_name)} {index + 1}</span>
+              <span>{shortClassName(track.class_name)}</span>
             </button>
           ))}
         </div>
@@ -128,7 +159,7 @@ export function Timeline({
                 </span>
               ))}
             </div>
-            {tracks.map((track) => {
+            {displayTracks.map((track) => {
               const left = (track.start_ms / totalDuration) * 100;
               const width = Math.max(0.5, ((track.end_ms - track.start_ms) / totalDuration) * 100);
               const color = classColours[track.class_name] ?? "#8ca9a1";
@@ -150,7 +181,7 @@ export function Timeline({
                     }}
                     title={`${shortClassName(track.class_name)} · ${formatTime(track.start_ms)}–${formatTime(track.end_ms)}`}
                   >
-                    {track.keyframes.map((keyframe) => (
+                    {(keyframesByTrack.get(track.track_id) ?? []).map((keyframe) => (
                       <i
                         className="keyframe-dot"
                         style={{
@@ -160,8 +191,7 @@ export function Timeline({
                       />
                     ))}
                   </button>
-                  {pendingSuggestions
-                    .filter((suggestion) => suggestion.track_id === track.track_id)
+                  {(suggestionsByTrack.get(track.track_id) ?? [])
                     .map((suggestion) => (
                       <button
                         className="context-timeline-marker"

@@ -42,6 +42,22 @@ describe("review geometry", () => {
     });
   });
 
+  it("interpolates unsorted keyframes without mutating their order", () => {
+    const unsorted = {
+      ...track,
+      keyframes: [...track.keyframes].reverse(),
+    };
+    expect(boxAtFrame(unsorted, 10)).toEqual({
+      x1: 0.2,
+      y1: 0.30000000000000004,
+      x2: 0.4,
+      y2: 0.5,
+    });
+    expect(unsorted.keyframes.map((keyframe) => keyframe.frame_index)).toEqual([
+      20, 0,
+    ]);
+  });
+
   it("normalizes reverse drag coordinates", () => {
     expect(normalizeBox({ x: 0.8, y: 0.7 }, { x: 0.2, y: 0.1 })).toEqual({
       x1: 0.2,

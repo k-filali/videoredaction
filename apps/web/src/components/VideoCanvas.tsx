@@ -3,11 +3,13 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from "react";
 
 import { boxAtFrame, isUsefulBox, moveBox, normalizeBox, resizeBox } from "../lib/geometry";
+import { buildTrackFrameIndex, tracksAtFrame } from "../lib/reviewPerformance";
 import type { NormalizedBox, RedactionStyle, ReviewTrack } from "../types";
 
 export interface VideoCanvasHandle {
@@ -51,6 +53,11 @@ interface SurfaceSize {
   height: number;
 }
 
+interface PixelBuffer {
+  canvas: HTMLCanvasElement;
+  context: CanvasRenderingContext2D;
+}
+
 function boxStyle(box: NormalizedBox) {
   return {
     left: `${box.x1 * 100}%`,
@@ -78,6 +85,7 @@ function redactRegion(
   source: HTMLVideoElement,
   box: NormalizedBox,
   style: RedactionStyle,
+  pixelBuffer: PixelBuffer,
 ) {
   const canvas = context.canvas;
   const x = Math.max(0, Math.min(canvas.width - 1, Math.floor(box.x1 * canvas.width)));
@@ -94,15 +102,33 @@ function redactRegion(
   }
 
   if (style === "pixelate") {
-    const sample = document.createElement("canvas");
-    const sampleContext = sample.getContext("2d");
-    if (!sampleContext) return;
-    sample.width = Math.max(1, Math.floor(width / 12));
-    sample.height = Math.max(1, Math.floor(height / 12));
-    sampleContext.drawImage(source, x, y, width, height, 0, 0, sample.width, sample.height);
+    const sampleWidth = Math.min(256, Math.max(1, Math.floor(width / 12)));
+    const sampleHeight = Math.min(256, Math.max(1, Math.floor(height / 12)));
+    pixelBuffer.context.clearRect(0, 0, sampleWidth, sampleHeight);
+    pixelBuffer.context.drawImage(
+      source,
+      x,
+      y,
+      width,
+      height,
+      0,
+      0,
+      sampleWidth,
+      sampleHeight,
+    );
     context.save();
     context.imageSmoothingEnabled = false;
-    context.drawImage(sample, 0, 0, sample.width, sample.height, x, y, width, height);
+    context.drawImage(
+      pixelBuffer.canvas,
+      0,
+      0,
+      sampleWidth,
+      sampleHeight,
+      x,
+      y,
+      width,
+      height,
+    );
     context.restore();
     return;
   }
@@ -146,7 +172,10 @@ export const VideoCanvas = forwardRef<VideoCanvasHandle, VideoCanvasProps>(
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const stageRef = useRef<HTMLDivElement>(null);
-    const animationRef = useRef<number | null>(null);
+    const scheduledFrameRef = useRef<number | null>(null);
+    const scheduledFrameKindRef = useRef<"video" | "animation" | null>(null);
+    const drawRef = useRef<() => void>(() => undefined);
+    const pixelBufferRef = useRef<PixelBuffer | null>(null);
     const lastFrameRef = useRef(-1);
     const manualStartRef = useRef<{ x: number; y: number; pointerId: number } | null>(null);
     const pointerEditRef = useRef<PointerEdit | null>(null);
@@ -155,6 +184,18 @@ export const VideoCanvas = forwardRef<VideoCanvasHandle, VideoCanvasProps>(
     const [ready, setReady] = useState(false);
     const [mediaSize, setMediaSize] = useState<SurfaceSize | null>(null);
     const [surfaceSize, setSurfaceSize] = useState<SurfaceSize | null>(null);
+    const trackIndex = useMemo(
+      () => buildTrackFrameIndex(tracks, Math.max(1, Math.round(frameRate))),
+      [frameRate, tracks],
+    );
+
+    if (pixelBufferRef.current === null && typeof document !== "undefined") {
+      const buffer = document.createElement("canvas");
+      buffer.width = 256;
+      buffer.height = 256;
+      const context = buffer.getContext("2d");
+      if (context) pixelBufferRef.current = { canvas: buffer, context };
+    }
 
     useEffect(() => {
       draftBoxRef.current = draftBox;
@@ -232,13 +273,22 @@ export const VideoCanvas = forwardRef<VideoCanvasHandle, VideoCanvasProps>(
       }
       const context = canvas.getContext("2d");
       if (!context) return;
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      context.clearRect(0, 0, canvas.width, canvas.height);
       const currentFrame = Math.max(0, Math.round(video.currentTime * frameRate));
-      if (showRedactions) {
-        tracks.forEach((track) => {
+      const pixelBuffer = pixelBufferRef.current;
+      if (showRedactions && pixelBuffer) {
+        tracksAtFrame(trackIndex, currentFrame).forEach((track) => {
           if (!track.active || !track.redacted) return;
           const box = boxAtFrame(track, currentFrame);
-          if (box) redactRegion(context, video, paddedBox(box, track.class_name), style);
+          if (box) {
+            redactRegion(
+              context,
+              video,
+              paddedBox(box, track.class_name),
+              style,
+              pixelBuffer,
+            );
+          }
         });
       }
       if (currentFrame !== lastFrameRef.current) {
@@ -246,24 +296,61 @@ export const VideoCanvas = forwardRef<VideoCanvasHandle, VideoCanvasProps>(
         setFrame(currentFrame);
         onTimeChange(video.currentTime * 1000, currentFrame);
       }
-    }, [frameRate, onTimeChange, showRedactions, style, tracks]);
+    }, [frameRate, onTimeChange, showRedactions, style, trackIndex]);
 
-    const animate = useCallback(() => {
-      draw();
-      if (videoRef.current && !videoRef.current.paused) {
-        animationRef.current = requestAnimationFrame(animate);
+    drawRef.current = draw;
+
+    const cancelFrameLoop = useCallback(() => {
+      const handle = scheduledFrameRef.current;
+      if (handle === null) return;
+      const video = videoRef.current;
+      if (
+        scheduledFrameKindRef.current === "video" &&
+        video?.cancelVideoFrameCallback
+      ) {
+        video.cancelVideoFrameCallback(handle);
+      } else {
+        cancelAnimationFrame(handle);
       }
-    }, [draw]);
+      scheduledFrameRef.current = null;
+      scheduledFrameKindRef.current = null;
+    }, []);
+
+    const startFrameLoop = useCallback(() => {
+      cancelFrameLoop();
+      const video = videoRef.current;
+      if (!video) return;
+
+      const schedule = () => {
+        if (video.paused || video.ended) return;
+        const render = () => {
+          scheduledFrameRef.current = null;
+          scheduledFrameKindRef.current = null;
+          drawRef.current();
+          schedule();
+        };
+        if (video.requestVideoFrameCallback) {
+          scheduledFrameKindRef.current = "video";
+          scheduledFrameRef.current = video.requestVideoFrameCallback(render);
+        } else {
+          scheduledFrameKindRef.current = "animation";
+          scheduledFrameRef.current = requestAnimationFrame(render);
+        }
+      };
+
+      drawRef.current();
+      schedule();
+    }, [cancelFrameLoop]);
 
     useEffect(() => {
       draw();
-    }, [draw, draftBox]);
+    }, [draw]);
 
     useEffect(
       () => () => {
-        if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
+        cancelFrameLoop();
       },
-      [],
+      [cancelFrameLoop],
     );
 
     useImperativeHandle(
@@ -285,7 +372,7 @@ export const VideoCanvas = forwardRef<VideoCanvasHandle, VideoCanvasProps>(
           const video = videoRef.current;
           if (!video) return;
           video.currentTime = Math.max(0, Math.min(video.duration || 0, timeMs / 1000));
-          draw();
+          drawRef.current();
         },
         stepFrames(frames: number) {
           const video = videoRef.current;
@@ -295,10 +382,10 @@ export const VideoCanvas = forwardRef<VideoCanvasHandle, VideoCanvasProps>(
             0,
             Math.min(video.duration || 0, video.currentTime + frames / frameRate),
           );
-          draw();
+          drawRef.current();
         },
       }),
-      [draw, frameRate],
+      [frameRate],
     );
 
     const pointFromEvent = (event: React.PointerEvent): { x: number; y: number } => {
@@ -310,11 +397,16 @@ export const VideoCanvas = forwardRef<VideoCanvasHandle, VideoCanvasProps>(
       };
     };
 
-    const selectedTrack = tracks.find((track) => track.track_id === selectedTrackId) ?? null;
+    const tracksInFrame = useMemo(
+      () => tracksAtFrame(trackIndex, frame),
+      [frame, trackIndex],
+    );
+    const selectedTrack =
+      tracks.find((track) => track.track_id === selectedTrackId) ?? null;
     const selectedBox =
       draftBox ?? (selectedTrack ? boxAtFrame(selectedTrack, frame) : null);
 
-    const visibleBoxes = tracks
+    const visibleBoxes = tracksInFrame
       .filter((track) => overlayTrackIds.has(track.track_id))
       .map((track) => ({ track, box: boxAtFrame(track, frame) }))
       .filter(
@@ -425,18 +517,23 @@ export const VideoCanvas = forwardRef<VideoCanvasHandle, VideoCanvasProps>(
           }}
           onLoadedData={() => {
             setReady(true);
-            draw();
+            drawRef.current();
           }}
-          onSeeked={draw}
+          onSeeked={() => drawRef.current()}
           onPlay={() => {
             onPlayingChange(true);
-            animationRef.current = requestAnimationFrame(animate);
+            startFrameLoop();
           }}
           onPause={() => {
+            cancelFrameLoop();
             onPlayingChange(false);
-            draw();
+            drawRef.current();
           }}
-          onEnded={() => onPlayingChange(false)}
+          onEnded={() => {
+            cancelFrameLoop();
+            onPlayingChange(false);
+            drawRef.current();
+          }}
           onError={onMediaError}
         />
         <canvas ref={canvasRef} className="video-canvas" aria-label="Video review preview" />

@@ -1,5 +1,28 @@
 import type { NormalizedBox, ReviewKeyframe, ReviewTrack } from "../types";
 
+const orderedKeyframeCache = new WeakMap<
+  ReviewKeyframe[],
+  readonly ReviewKeyframe[]
+>();
+
+function orderedKeyframes(keyframes: ReviewKeyframe[]): readonly ReviewKeyframe[] {
+  const cached = orderedKeyframeCache.get(keyframes);
+  if (cached) return cached;
+
+  let ordered = true;
+  for (let index = 1; index < keyframes.length; index += 1) {
+    if (keyframes[index - 1]!.frame_index > keyframes[index]!.frame_index) {
+      ordered = false;
+      break;
+    }
+  }
+  const result = ordered
+    ? keyframes
+    : [...keyframes].sort((a, b) => a.frame_index - b.frame_index);
+  orderedKeyframeCache.set(keyframes, result);
+  return result;
+}
+
 export function clamp(value: number, min = 0, max = 1): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -18,21 +41,21 @@ export function isUsefulBox(box: NormalizedBox): boolean {
 
 export function boxAtFrame(track: ReviewTrack, frame: number): NormalizedBox | null {
   if (!track.active || frame < track.start_frame || frame > track.end_frame) return null;
-  const keyframes = [...track.keyframes].sort((a, b) => a.frame_index - b.frame_index);
+  const keyframes = orderedKeyframes(track.keyframes);
   if (keyframes.length === 0) return null;
   if (keyframes.length === 1 || frame <= keyframes[0]!.frame_index) return keyframes[0]!.bbox;
   const last = keyframes[keyframes.length - 1]!;
   if (frame >= last.frame_index) return last.bbox;
 
-  let left: ReviewKeyframe = keyframes[0]!;
-  let right: ReviewKeyframe = last;
-  for (let index = 1; index < keyframes.length; index += 1) {
-    if (keyframes[index]!.frame_index >= frame) {
-      right = keyframes[index]!;
-      left = keyframes[index - 1]!;
-      break;
-    }
+  let low = 0;
+  let high = keyframes.length - 1;
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2);
+    if (keyframes[middle]!.frame_index <= frame) low = middle;
+    else high = middle;
   }
+  const left: ReviewKeyframe = keyframes[low]!;
+  const right: ReviewKeyframe = keyframes[high]!;
   const span = right.frame_index - left.frame_index;
   const t = span === 0 ? 0 : (frame - left.frame_index) / span;
   return {
