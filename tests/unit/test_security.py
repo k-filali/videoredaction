@@ -16,6 +16,11 @@ def test_remote_binding_requires_access_token() -> None:
         Settings(api_host="0.0.0.0", access_token=None)
 
 
+def test_gcs_backend_requires_a_bucket() -> None:
+    with pytest.raises(ValidationError, match="GCS bucket"):
+        Settings(storage_backend="gcs", gcs_bucket=None)
+
+
 def test_access_token_protects_sensitive_api(tmp_path: Path) -> None:
     database = Database(f"sqlite:///{(tmp_path / 'secured.db').as_posix()}")
     settings = Settings(

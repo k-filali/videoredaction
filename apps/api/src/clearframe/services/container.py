@@ -1,8 +1,10 @@
 from dataclasses import dataclass
+from datetime import timedelta
 
 from clearframe.config import Settings
 from clearframe.database import Database
 from clearframe.domain.enums import JobType
+from clearframe.gcs_storage import GCSStorage
 from clearframe.jobs import JobExecutor, LocalJobRunner
 from clearframe.media import MediaProcessor
 from clearframe.services.export import ExportService
@@ -28,7 +30,20 @@ class ServiceContainer:
 
     @classmethod
     def build(cls, settings: Settings, database: Database) -> "ServiceContainer":
-        storage = LocalStorage(settings.storage_root)
+        storage: ArtifactStorage
+        if settings.storage_backend == "gcs":
+            if settings.gcs_bucket is None:
+                raise ValueError("a GCS bucket is required")
+            storage = GCSStorage(
+                settings.gcs_bucket,
+                settings.storage_scratch_root,
+                signed_url_ttl=timedelta(
+                    minutes=settings.artifact_url_ttl_minutes
+                ),
+                signing_service_account=settings.gcs_signing_service_account,
+            )
+        else:
+            storage = LocalStorage(settings.storage_root)
         media = MediaProcessor(
             settings.ffmpeg_path,
             max_duration_ms=settings.max_duration_minutes * 60 * 1000,

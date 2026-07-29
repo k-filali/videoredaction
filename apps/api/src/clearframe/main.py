@@ -1,7 +1,6 @@
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -31,9 +30,11 @@ SCHEMA_HEAD = "31a6b945ef72"
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
-    settings.storage_root.mkdir(parents=True, exist_ok=True)
-    Path("data").mkdir(parents=True, exist_ok=True)
-    app.state.database.create_schema()
+    if (
+        settings.env in {"development", "test"}
+        and app.state.database.engine.url.drivername == "sqlite"
+    ):
+        app.state.database.create_schema()
     app.state.services.runner.recover_interrupted_jobs()
     app.state.services.proxy.reconcile_all()
     try:
