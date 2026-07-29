@@ -14,7 +14,7 @@ from clearframe.media import (
     ProxyAssessment,
 )
 from clearframe.models import ProcessingJob, Track, VideoAsset, new_id
-from clearframe.storage import LocalStorage
+from clearframe.storage import ArtifactStorage
 
 
 class ProxyRepairError(RuntimeError):
@@ -34,7 +34,7 @@ class ProxyService:
     def __init__(
         self,
         database: Database,
-        storage: LocalStorage,
+        storage: ArtifactStorage,
         media: MediaProcessor,
         runner: JobDispatcher,
     ) -> None:
@@ -106,8 +106,12 @@ class ProxyService:
             original_uri = video.original_uri
             proxy_uri = video.proxy_uri
 
-        source_metadata = self.media.probe(self.storage.path_for(original_uri))
-        proxy_metadata = self.media.probe(self.storage.path_for(proxy_uri))
+        with (
+            self.storage.materialize_input(original_uri) as original_path,
+            self.storage.materialize_input(proxy_uri) as proxy_path,
+        ):
+            source_metadata = self.media.probe(original_path)
+            proxy_metadata = self.media.probe(proxy_path)
         assessment = self.media.assess_proxy(source_metadata, proxy_metadata)
 
         with self.database.session() as session:
@@ -307,86 +311,82 @@ class ProxyService:
             }
             session.commit()
 
-        original_path = self.storage.path_for(original_uri)
-        proxy_path = self.storage.path_for(proxy_uri)
-        if not original_path.is_file() or not proxy_path.is_file():
-            raise ProxyRepairError("proxy repair input is missing")
-
-        context.update(0.08, "validating stale proxy")
-        source_metadata = self.media.probe(original_path)
-        existing_metadata = self.media.probe(proxy_path)
-        existing_assessment = self.media.assess_proxy(
-            source_metadata,
-            existing_metadata,
-        )
-        if existing_assessment.current:
-            with self.database.session() as session:
-                video = session.get(VideoAsset, video_id)
-                if video is None:
-                    raise ProxyRepairError("video disappeared during proxy repair")
-                self._record_current(
-                    video,
-                    source_metadata,
-                    existing_metadata,
-                    repair={"status": "complete", "job_id": job_id},
-                )
-                session.commit()
-            return
-
-        with self.database.session() as session:
-            track_count = session.scalar(
-                select(func.count(Track.id)).where(Track.video_id == video_id)
-            )
-        if track_count and not existing_assessment.timeline_compatible:
-            raise ProxyRepairError("existing tracks are incompatible with the source timeline")
-
-        candidate = proxy_path.with_name(f".{proxy_path.stem}.repair-{job_id}.mp4")
-        candidate.unlink(missing_ok=True)
-        try:
-            context.update(0.2, "regenerating review proxy")
-            self.media.generate_proxy(
-                original_path,
-                candidate,
-                metadata=source_metadata,
-            )
-            context.update(0.85, "validating regenerated proxy")
-            candidate_metadata = self.media.probe(candidate)
-            candidate_assessment = self.media.assess_proxy(
+        with (
+            self.storage.materialize_input(original_uri) as original_path,
+            self.storage.materialize_input(proxy_uri) as existing_path,
+        ):
+            context.update(0.08, "validating stale proxy")
+            source_metadata = self.media.probe(original_path)
+            existing_metadata = self.media.probe(existing_path)
+            existing_assessment = self.media.assess_proxy(
                 source_metadata,
-                candidate_metadata,
+                existing_metadata,
             )
-            if not candidate_assessment.current:
+            if existing_assessment.current:
+                with self.database.session() as session:
+                    video = session.get(VideoAsset, video_id)
+                    if video is None:
+                        raise ProxyRepairError("video disappeared during proxy repair")
+                    self._record_current(
+                        video,
+                        source_metadata,
+                        existing_metadata,
+                        repair={"status": "complete", "job_id": job_id},
+                    )
+                    session.commit()
+                return
+
+            with self.database.session() as session:
+                track_count = session.scalar(
+                    select(func.count(Track.id)).where(Track.video_id == video_id)
+                )
+            if track_count and not existing_assessment.timeline_compatible:
                 raise ProxyRepairError(
-                    "regenerated proxy does not match the current profile"
+                    "existing tracks are incompatible with the source timeline"
                 )
 
-            context.update(0.94, "activating regenerated proxy")
-            candidate.replace(proxy_path)
-            with self.database.session() as session:
-                video = session.get(VideoAsset, video_id)
-                if video is None:
-                    raise ProxyRepairError("video disappeared during proxy repair")
-                self._record_current(
-                    video,
+            context.update(0.2, "regenerating review proxy")
+            with self.storage.publish_output(proxy_uri) as candidate:
+                self.media.generate_proxy(
+                    original_path,
+                    candidate,
+                    metadata=source_metadata,
+                )
+                context.update(0.85, "validating regenerated proxy")
+                candidate_metadata = self.media.probe(candidate)
+                candidate_assessment = self.media.assess_proxy(
                     source_metadata,
                     candidate_metadata,
-                    repair={
-                        "status": "complete",
-                        "job_id": job_id,
-                        "reasons": list(existing_assessment.reasons),
-                    },
                 )
-                session.commit()
-            self.logger.info(
-                "proxy_repair_complete",
-                video_id=video_id,
-                job_id=job_id,
-                strategy=self.media.proxy_strategy(source_metadata),
-                width=candidate_metadata.width,
-                height=candidate_metadata.height,
+                if not candidate_assessment.current:
+                    raise ProxyRepairError(
+                        "regenerated proxy does not match the current profile"
+                    )
+
+        context.update(0.94, "activating regenerated proxy")
+        with self.database.session() as session:
+            video = session.get(VideoAsset, video_id)
+            if video is None:
+                raise ProxyRepairError("video disappeared during proxy repair")
+            self._record_current(
+                video,
+                source_metadata,
+                candidate_metadata,
+                repair={
+                    "status": "complete",
+                    "job_id": job_id,
+                    "reasons": list(existing_assessment.reasons),
+                },
             )
-        finally:
-            candidate.unlink(missing_ok=True)
+            session.commit()
+        self.logger.info(
+            "proxy_repair_complete",
+            video_id=video_id,
+            job_id=job_id,
+            strategy=self.media.proxy_strategy(source_metadata),
+            width=candidate_metadata.width,
+            height=candidate_metadata.height,
+        )
 
     def _record_current(
         self,

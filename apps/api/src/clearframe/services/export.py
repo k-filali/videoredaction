@@ -44,7 +44,11 @@ from clearframe.services.review import (
     append_system_audit_event,
     build_review_snapshot_at_revision,
 )
-from clearframe.storage import LocalStorage
+from clearframe.storage import (
+    ArtifactStorage,
+    export_manifest_key,
+    export_video_key,
+)
 
 
 def utc_now() -> datetime:
@@ -86,7 +90,7 @@ class ExportService:
     def __init__(
         self,
         database: Database,
-        storage: LocalStorage,
+        storage: ArtifactStorage,
         media: MediaProcessor,
         runner: JobDispatcher,
         build_id: str,
@@ -201,8 +205,8 @@ class ExportService:
             artifact = session.get(ExportArtifact, export_id)
             if artifact is None:
                 raise ExportNotFoundError(export_id)
-            video_uri = self.storage.export_video_uri(artifact.video_id, export_id)
-            manifest_uri = self.storage.export_manifest_uri(artifact.video_id, export_id)
+            video_uri = export_video_key(artifact.video_id, export_id)
+            manifest_uri = export_manifest_key(artifact.video_id, export_id)
             artifact.status = ExportStatus.RENDERING
             session.commit()
         try:
@@ -210,9 +214,6 @@ class ExportService:
         except Exception:
             self.storage.remove_file(video_uri)
             self.storage.remove_file(manifest_uri)
-            temporary_manifest = self.storage.path_for(manifest_uri).with_suffix(".json.tmp")
-            if temporary_manifest.is_file():
-                temporary_manifest.unlink()
             raise
 
     def _render(self, context: JobContext, *, export_id: str) -> None:
@@ -257,48 +258,50 @@ class ExportService:
         if fps <= 0 or expected_width <= 0 or expected_height <= 0:
             raise ExportValidationError("source media metadata is incomplete")
 
-        original_path = self.storage.path_for(original_uri)
-        if sha256_file(original_path) != expected_original_hash:
-            raise ExportValidationError("original checksum verification failed")
-
-        export_uri = self.storage.export_video_uri(video_id, export_id)
-        export_path = self.storage.prepare(export_uri)
-        context.update(0.05, "rendering reviewed frames")
-        rendered_video = self._render_video(
-            source=original_path,
-            destination=export_path,
-            snapshot=snapshot,
-            style=RedactionStyle(artifact.redaction_style),
-            fps=fps,
-            width=expected_width,
-            height=expected_height,
-            estimated_frames=max(
-                1,
-                round(expected_duration_ms * fps / 1000),
-            ),
-            context=context,
-        )
-
-        context.update(0.9, "verifying export")
-        with self.database.session() as session:
-            stored_artifact = session.get(ExportArtifact, export_id)
-            if stored_artifact is None:
-                raise ExportNotFoundError(export_id)
-            stored_artifact.status = ExportStatus.VERIFYING
-            session.commit()
-        output_metadata = rendered_video.metadata
-        frame_tolerance_ms = max(150, round(2000 / fps))
-        if abs(output_metadata.duration_ms - expected_duration_ms) > frame_tolerance_ms:
-            raise ExportValidationError("export duration is outside tolerance")
-        if (
-            output_metadata.width != expected_width
-            or output_metadata.height != expected_height
+        export_uri = export_video_key(video_id, export_id)
+        with (
+            self.storage.materialize_input(original_uri) as original_path,
+            self.storage.publish_output(export_uri) as export_path,
         ):
-            raise ExportValidationError("export dimensions do not match the original")
-        if sha256_file(original_path) != expected_original_hash:
-            raise ExportValidationError("original changed during export")
+            if sha256_file(original_path) != expected_original_hash:
+                raise ExportValidationError("original checksum verification failed")
 
-        export_hash = sha256_file(export_path)
+            context.update(0.05, "rendering reviewed frames")
+            rendered_video = self._render_video(
+                source=original_path,
+                destination=export_path,
+                snapshot=snapshot,
+                style=RedactionStyle(artifact.redaction_style),
+                fps=fps,
+                width=expected_width,
+                height=expected_height,
+                estimated_frames=max(
+                    1,
+                    round(expected_duration_ms * fps / 1000),
+                ),
+                context=context,
+            )
+
+            context.update(0.9, "verifying export")
+            with self.database.session() as session:
+                stored_artifact = session.get(ExportArtifact, export_id)
+                if stored_artifact is None:
+                    raise ExportNotFoundError(export_id)
+                stored_artifact.status = ExportStatus.VERIFYING
+                session.commit()
+            output_metadata = rendered_video.metadata
+            frame_tolerance_ms = max(150, round(2000 / fps))
+            if abs(output_metadata.duration_ms - expected_duration_ms) > frame_tolerance_ms:
+                raise ExportValidationError("export duration is outside tolerance")
+            if (
+                output_metadata.width != expected_width
+                or output_metadata.height != expected_height
+            ):
+                raise ExportValidationError("export dimensions do not match the original")
+            if sha256_file(original_path) != expected_original_hash:
+                raise ExportValidationError("original changed during export")
+
+            export_hash = sha256_file(export_path)
         track_counts = Counter(
             track.class_name
             for track in snapshot.tracks.values()
@@ -343,8 +346,9 @@ class ExportService:
             "warnings": warnings,
             "created_at": utc_now().isoformat(),
         }
-        manifest_uri = self.storage.export_manifest_uri(video_id, export_id)
-        self._write_manifest(self.storage.prepare(manifest_uri), manifest)
+        manifest_uri = export_manifest_key(video_id, export_id)
+        with self.storage.publish_output(manifest_uri) as manifest_path:
+            self._write_manifest(manifest_path, manifest)
 
         with self.database.session() as session:
             stored_artifact = session.get(ExportArtifact, export_id)

@@ -23,7 +23,13 @@ class RedirectStorage(LocalStorage):
     def exists(self, uri: str) -> bool:
         return True
 
-    def delivery_for(self, key: str) -> ArtifactDelivery:
+    def delivery_for(
+        self,
+        key: str,
+        *,
+        filename: str | None = None,
+    ) -> ArtifactDelivery:
+        del key, filename
         return ArtifactDelivery.redirect(self.url)
 
 

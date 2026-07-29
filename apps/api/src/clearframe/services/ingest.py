@@ -1,5 +1,6 @@
 import hashlib
 import re
+import shutil
 from dataclasses import dataclass
 
 from fastapi import UploadFile
@@ -11,7 +12,14 @@ from clearframe.domain.enums import JobType, VideoStatus
 from clearframe.jobs import JobContext, JobDispatcher
 from clearframe.media import MediaError, MediaKind, MediaProcessor, sha256_file, sniff_media
 from clearframe.models import ProcessingJob, VideoAsset, new_id
-from clearframe.storage import LocalStorage, sanitize_filename
+from clearframe.storage import (
+    ArtifactStorage,
+    original_key,
+    proxy_key,
+    sanitize_filename,
+    temporary_upload_key,
+    thumbnail_key,
+)
 
 
 class IngestError(ValueError):
@@ -42,7 +50,7 @@ class IngestService:
     def __init__(
         self,
         database: Database,
-        storage: LocalStorage,
+        storage: ArtifactStorage,
         media: MediaProcessor,
         runner: JobDispatcher,
         max_upload_mb: int,
@@ -70,36 +78,27 @@ class IngestService:
         validated_case_hash = self._validate_case_hash(hashed_case_id)
         display_name = sanitize_filename(upload.filename)
         video_id = new_id()
-        temporary_uri = self.storage.temporary_upload_uri(video_id)
-        temporary_path = self.storage.prepare(temporary_uri)
+        temporary_uri = temporary_upload_key(video_id)
         digest = hashlib.sha256()
         total_bytes = 0
 
         try:
-            with temporary_path.open("xb") as stream:
-                while chunk := await upload.read(1024 * 1024):
-                    total_bytes += len(chunk)
-                    if total_bytes > self.max_upload_bytes:
-                        raise UploadTooLargeError(
-                            f"video exceeds the {self.max_upload_bytes // (1024 * 1024)} MB limit"
-                        )
-                    digest.update(chunk)
-                    stream.write(chunk)
-        except Exception:
-            self.storage.remove_file(temporary_uri)
-            raise
+            with self.storage.publish_output(temporary_uri) as temporary_path:
+                with temporary_path.open("xb") as stream:
+                    while chunk := await upload.read(1024 * 1024):
+                        total_bytes += len(chunk)
+                        if total_bytes > self.max_upload_bytes:
+                            raise UploadTooLargeError(
+                                "video exceeds the "
+                                f"{self.max_upload_bytes // (1024 * 1024)} MB limit"
+                            )
+                        digest.update(chunk)
+                        stream.write(chunk)
+                if total_bytes == 0:
+                    raise EmptyUploadError("video is empty")
+                media_kind = sniff_media(temporary_path)
         finally:
             await upload.close()
-
-        if total_bytes == 0:
-            self.storage.remove_file(temporary_uri)
-            raise EmptyUploadError("video is empty")
-
-        try:
-            media_kind = sniff_media(temporary_path)
-        except Exception:
-            self.storage.remove_file(temporary_uri)
-            raise
 
         checksum = digest.hexdigest()
         with self.database.session() as session:
@@ -202,8 +201,8 @@ class IngestService:
         media_kind: MediaKind,
         expected_checksum: str,
     ) -> None:
-        proxy_uri = self.storage.proxy_uri(video_id)
-        thumbnail_uri = self.storage.thumbnail_uri(video_id)
+        proxy_uri = proxy_key(video_id)
+        thumbnail_uri = thumbnail_key(video_id)
         try:
             self._finalize(
                 context,
@@ -228,53 +227,55 @@ class IngestService:
         media_kind: MediaKind,
         expected_checksum: str,
     ) -> None:
-        temporary_path = self.storage.path_for(temporary_uri)
-        context.update(0.08, "validating media")
-        metadata = self.media.probe(temporary_path)
+        with self.storage.materialize_input(temporary_uri) as temporary_path:
+            context.update(0.08, "validating media")
+            metadata = self.media.probe(temporary_path)
 
-        original_uri = self.storage.original_uri(video_id, media_kind.extension)
-        original_path = self.storage.promote(temporary_uri, original_uri)
-        if sha256_file(original_path) != expected_checksum:
-            raise MediaError("original checksum changed during ingest")
-        self.storage.make_read_only(original_uri)
+            original_uri = original_key(video_id, media_kind.extension)
+            with self.storage.publish_output(original_uri) as original_path:
+                shutil.copyfile(temporary_path, original_path)
+                if sha256_file(original_path) != expected_checksum:
+                    raise MediaError("original checksum changed during ingest")
 
-        with self.database.session() as session:
-            video = session.get(VideoAsset, video_id)
-            if video is None:
-                raise IngestError("video record disappeared during ingest")
-            video.duration_ms = metadata.duration_ms
-            video.fps = metadata.fps
-            video.width = metadata.width
-            video.height = metadata.height
-            video.codec = metadata.codec
-            video.audio_present = metadata.audio_present
-            video.original_uri = original_uri
-            video.status = VideoStatus.PROXYING
-            video.metadata_json = {
-                **video.metadata_json,
-                "frame_count_estimate": metadata.frame_count_estimate,
-                "ffmpeg_version": metadata.ffmpeg_version,
-            }
-            session.commit()
+            with self.database.session() as session:
+                video = session.get(VideoAsset, video_id)
+                if video is None:
+                    raise IngestError("video record disappeared during ingest")
+                video.duration_ms = metadata.duration_ms
+                video.fps = metadata.fps
+                video.width = metadata.width
+                video.height = metadata.height
+                video.codec = metadata.codec
+                video.audio_present = metadata.audio_present
+                video.original_uri = original_uri
+                video.status = VideoStatus.PROXYING
+                video.metadata_json = {
+                    **video.metadata_json,
+                    "frame_count_estimate": metadata.frame_count_estimate,
+                    "ffmpeg_version": metadata.ffmpeg_version,
+                }
+                session.commit()
 
-        context.update(0.35, "generating review proxy")
-        proxy_uri = self.storage.proxy_uri(video_id)
-        self.media.generate_proxy(
-            original_path,
-            self.storage.prepare(proxy_uri),
-            metadata=metadata,
-        )
+            context.update(0.35, "generating review proxy")
+            proxy_uri = proxy_key(video_id)
+            with self.storage.publish_output(proxy_uri) as proxy_path:
+                self.media.generate_proxy(
+                    temporary_path,
+                    proxy_path,
+                    metadata=metadata,
+                )
 
-        context.update(0.88, "generating thumbnail")
-        thumbnail_uri = self.storage.thumbnail_uri(video_id)
-        try:
-            self.media.generate_thumbnail(
-                original_path,
-                self.storage.prepare(thumbnail_uri),
-                metadata.duration_ms,
-            )
-        except MediaError:
-            thumbnail_uri = ""
+            context.update(0.88, "generating thumbnail")
+            thumbnail_uri = thumbnail_key(video_id)
+            try:
+                with self.storage.publish_output(thumbnail_uri) as thumbnail_path:
+                    self.media.generate_thumbnail(
+                        temporary_path,
+                        thumbnail_path,
+                        metadata.duration_ms,
+                    )
+            except MediaError:
+                thumbnail_uri = ""
 
         with self.database.session() as session:
             video = session.get(VideoAsset, video_id)

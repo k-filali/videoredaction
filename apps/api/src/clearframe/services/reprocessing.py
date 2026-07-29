@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import pairwise
@@ -36,7 +37,7 @@ from clearframe.services.review import (
     append_review_action,
     build_review_snapshot,
 )
-from clearframe.storage import LocalStorage
+from clearframe.storage import ArtifactStorage
 
 
 class ReprocessingError(ValueError):
@@ -126,7 +127,7 @@ class ReprocessingService:
     def __init__(
         self,
         database: Database,
-        storage: LocalStorage,
+        storage: ArtifactStorage,
         runner: JobDispatcher,
         *,
         window_seconds: int = 3,
@@ -575,8 +576,13 @@ class ReprocessingService:
         end_frame = min(seed.track_end_frame, seed.frame_index + window_frames)
         context.update(0.08, "loading corrected context")
 
-        capture = cv2.VideoCapture(str(self.storage.path_for(seed.proxy_uri)))
+        materialized_input = ExitStack()
+        proxy_path = materialized_input.enter_context(
+            self.storage.materialize_input(seed.proxy_uri)
+        )
+        capture = cv2.VideoCapture(str(proxy_path))
         if not capture.isOpened():
+            materialized_input.close()
             raise ReprocessingValidationError("review proxy could not be opened")
         capture_fps = float(capture.get(cv2.CAP_PROP_FPS))
         fps = capture_fps if capture_fps > 0 else seed.fps
@@ -603,6 +609,7 @@ class ReprocessingService:
                 )
         finally:
             capture.release()
+            materialized_input.close()
 
         context.update(0.78, "storing reprocessing suggestions")
         with self.database.session() as session:

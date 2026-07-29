@@ -1,4 +1,3 @@
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -113,10 +112,7 @@ def create_app(
         checks = {
             "database": database_ready,
             "schema": revision == SCHEMA_HEAD,
-            "storage": (
-                resolved_services.storage.root.is_dir()
-                and os.access(resolved_services.storage.root, os.W_OK)
-            ),
+            "storage": resolved_services.storage.healthcheck(),
             "ffmpeg": resolved_services.media.ffmpeg_path.is_file(),
         }
         is_ready = all(checks.values())

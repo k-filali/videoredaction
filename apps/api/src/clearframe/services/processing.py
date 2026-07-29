@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,7 +59,7 @@ from clearframe.pipeline import (
     class_aware_nms,
 )
 from clearframe.pipeline.detection import Frame
-from clearframe.storage import LocalStorage
+from clearframe.storage import ArtifactStorage
 
 
 def utc_now() -> datetime:
@@ -177,7 +178,7 @@ class ProcessingService:
     def __init__(
         self,
         database: Database,
-        storage: LocalStorage,
+        storage: ArtifactStorage,
         runner: JobDispatcher,
         *,
         registry: ModelRegistry | None = None,
@@ -503,14 +504,20 @@ class ProcessingService:
 
         started = perf_counter()
         context.update(0.03, "sampling proxy frames")
-        capture = cv2.VideoCapture(str(self.storage.path_for(proxy_uri)))
+        materialized_input = ExitStack()
+        proxy_path = materialized_input.enter_context(
+            self.storage.materialize_input(proxy_uri)
+        )
+        capture = cv2.VideoCapture(str(proxy_path))
         if not capture.isOpened():
+            materialized_input.close()
             raise ProcessingValidationError("review proxy could not be opened")
 
         capture_fps = float(capture.get(cv2.CAP_PROP_FPS))
         fps = capture_fps if capture_fps > 0 else fallback_fps
         if fps <= 0:
             capture.release()
+            materialized_input.close()
             raise ProcessingValidationError("proxy frame rate is unavailable")
         estimated_frames = max(1, round(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
         observations: list[_ObservedDetection] = []
@@ -691,6 +698,7 @@ class ProcessingService:
                     cancel_futures=True,
                 )
             capture.release()
+            materialized_input.close()
 
         if frames_decoded == 0:
             raise ProcessingValidationError("review proxy contained no decodable frames")

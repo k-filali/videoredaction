@@ -45,7 +45,12 @@ class ArtifactStorage(Protocol):
 
     def publish_output(self, key: str) -> AbstractContextManager[Path]: ...
 
-    def delivery_for(self, key: str) -> ArtifactDelivery: ...
+    def delivery_for(
+        self,
+        key: str,
+        *,
+        filename: str | None = None,
+    ) -> ArtifactDelivery: ...
 
     def healthcheck(self) -> bool: ...
 
@@ -156,7 +161,13 @@ class LocalStorage:
             if temporary.is_file():
                 temporary.unlink()
 
-    def delivery_for(self, key: str) -> ArtifactDelivery:
+    def delivery_for(
+        self,
+        key: str,
+        *,
+        filename: str | None = None,
+    ) -> ArtifactDelivery:
+        del filename
         path = self.path_for(key)
         if not path.is_file():
             raise FileNotFoundError("artifact is missing")

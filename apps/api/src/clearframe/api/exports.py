@@ -118,9 +118,10 @@ def download_export(
         or not services.storage.exists(artifact.export_uri)
     ):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="export is not ready")
+    filename = f"clearframe-{artifact.video_id[:8]}-redacted.mp4"
     return _download_response(
-        services.storage.delivery_for(artifact.export_uri),
-        filename=f"clearframe-{artifact.video_id[:8]}-redacted.mp4",
+        services.storage.delivery_for(artifact.export_uri, filename=filename),
+        filename=filename,
     )
 
 
@@ -157,9 +158,9 @@ def get_latest_manifest(
 
 
 def _load_manifest(services: ServiceContainer, manifest_uri: str) -> dict[str, Any]:
-    path = services.storage.path_for(manifest_uri)
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        with services.storage.materialize_input(manifest_uri) as path:
+            payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

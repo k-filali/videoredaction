@@ -35,6 +35,12 @@ from clearframe.models import (
 from clearframe.services.container import ServiceContainer
 from clearframe.services.export import ExportValidationError
 from clearframe.services.review import append_review_action
+from clearframe.storage import LocalStorage
+
+
+def local_storage(services: ServiceContainer) -> LocalStorage:
+    assert isinstance(services.storage, LocalStorage)
+    return services.storage
 
 
 @pytest.fixture
@@ -127,7 +133,7 @@ def test_frozen_review_exports_verified_black_box_video(
         video = session.get(VideoAsset, video_id)
         assert video is not None
         assert video.original_uri is not None
-        original_path = services.storage.path_for(video.original_uri)
+        original_path = local_storage(services).path_for(video.original_uri)
     before_export_hash = sha256_file(original_path)
 
     requested = services.export.request(
@@ -158,8 +164,8 @@ def test_frozen_review_exports_verified_black_box_video(
         assert artifact.export_uri is not None
         assert artifact.manifest_uri is not None
         assert artifact.export_sha256 is not None
-        export_path = services.storage.path_for(artifact.export_uri)
-        manifest_path = services.storage.path_for(artifact.manifest_uri)
+        export_path = local_storage(services).path_for(artifact.export_uri)
+        manifest_path = local_storage(services).path_for(artifact.manifest_uri)
 
     assert sha256_file(original_path) == before_export_hash == original_sha256
     assert export_path.is_file()
@@ -256,8 +262,8 @@ def test_failed_hardware_encoder_restarts_cleanly_on_cpu(
         assert job.status == JobStatus.COMPLETED
         assert artifact.export_uri is not None
         assert artifact.manifest_uri is not None
-        export_path = services.storage.path_for(artifact.export_uri)
-        manifest_path = services.storage.path_for(artifact.manifest_uri)
+        export_path = local_storage(services).path_for(artifact.export_uri)
+        manifest_path = local_storage(services).path_for(artifact.manifest_uri)
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["video_encoder"] == "libx264"
@@ -309,9 +315,10 @@ def test_failed_encoder_attempts_leave_no_export_artifact(
     )
     services.runner.wait(requested.job.id, timeout=120)
 
-    export_uri = services.storage.export_video_uri(video_id, requested.artifact.id)
-    manifest_uri = services.storage.export_manifest_uri(video_id, requested.artifact.id)
-    export_path = services.storage.path_for(export_uri)
+    storage = local_storage(services)
+    export_uri = storage.export_video_uri(video_id, requested.artifact.id)
+    manifest_uri = storage.export_manifest_uri(video_id, requested.artifact.id)
+    export_path = storage.path_for(export_uri)
     with database.session() as session:
         artifact = session.get(ExportArtifact, requested.artifact.id)
         job = session.get(ProcessingJob, requested.job.id)
@@ -321,7 +328,7 @@ def test_failed_encoder_attempts_leave_no_export_artifact(
         assert job.status == JobStatus.FAILED
 
     assert not export_path.exists()
-    assert not services.storage.path_for(manifest_uri).exists()
+    assert not storage.path_for(manifest_uri).exists()
     assert list(export_path.parent.glob("*.part.mp4")) == []
 
 
@@ -358,7 +365,7 @@ def test_unresolved_proposal_rejects_export(
         assert video.status == VideoStatus.READY_FOR_REVIEW
         assert artifacts == []
         assert export_jobs == []
-        assert sha256_file(services.storage.path_for(video.original_uri)) == original_sha256
+        assert sha256_file(local_storage(services).path_for(video.original_uri)) == original_sha256
 
 
 def test_pending_context_suggestion_rejects_export(

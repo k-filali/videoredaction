@@ -25,6 +25,11 @@ from clearframe.services.ingest import DuplicateVideoError, IngestService
 from clearframe.storage import LocalStorage
 
 
+def local_storage(services: ServiceContainer) -> LocalStorage:
+    assert isinstance(services.storage, LocalStorage)
+    return services.storage
+
+
 def build_services(tmp_path: Path) -> tuple[Database, ServiceContainer]:
     database = Database(f"sqlite:///{(tmp_path / 'clearframe.db').as_posix()}")
     database.create_schema()
@@ -100,8 +105,9 @@ def test_decode_failure_cleans_temporary_artifacts(tmp_path: Path) -> None:
         assert job is not None
         assert video.status == VideoStatus.FAILED
         assert job.status == JobStatus.FAILED
-    assert not list(services.storage.root.rglob("*.upload"))
-    assert not list(services.storage.root.rglob("proxy.mp4"))
+    storage = local_storage(services)
+    assert not list(storage.root.rglob("*.upload"))
+    assert not list(storage.root.rglob("proxy.mp4"))
     services.runner.shutdown()
 
 
@@ -150,8 +156,9 @@ def test_ingest_preserves_original_and_rejects_duplicates(
         assert job.status == JobStatus.COMPLETED
         assert video.original_uri is not None
         assert video.proxy_uri is not None
-        assert sha256_file(services.storage.path_for(video.original_uri)) == original_checksum
-        assert services.storage.path_for(video.proxy_uri).is_file()
+        storage = local_storage(services)
+        assert sha256_file(storage.path_for(video.original_uri)) == original_checksum
+        assert storage.path_for(video.proxy_uri).is_file()
 
     async def accept_duplicate() -> None:
         with source.open("rb") as stream, pytest.raises(DuplicateVideoError):

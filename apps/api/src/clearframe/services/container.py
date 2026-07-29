@@ -10,13 +10,13 @@ from clearframe.services.ingest import IngestService
 from clearframe.services.processing import ProcessingService
 from clearframe.services.proxy import ProxyService
 from clearframe.services.reprocessing import ReprocessingService
-from clearframe.storage import LocalStorage
+from clearframe.storage import ArtifactStorage, LocalStorage
 
 
 @dataclass(slots=True)
 class ServiceContainer:
     database: Database
-    storage: LocalStorage
+    storage: ArtifactStorage
     media: MediaProcessor
     executor: JobExecutor
     runner: LocalJobRunner
