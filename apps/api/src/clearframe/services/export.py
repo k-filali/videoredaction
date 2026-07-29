@@ -75,6 +75,7 @@ class _EncoderFailure(ExportValidationError):
 class RequestedExport:
     artifact: ExportArtifact
     job: ProcessingJob
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,23 +103,41 @@ class ExportService:
         self.build_id = build_id
 
     @staticmethod
-    def _validate_snapshot(snapshot: ReviewSnapshot) -> None:
+    def _unconfirmed_track_count(snapshot: ReviewSnapshot) -> int:
+        return sum(1 for track in snapshot.tracks.values() if not track.accepted)
+
+    @classmethod
+    def _review_warnings(
+        cls,
+        snapshot: ReviewSnapshot,
+        *,
+        pending_suggestions: int,
+    ) -> list[str]:
+        warnings = []
         if not snapshot.tracks:
-            raise ExportValidationError("review has no redaction tracks")
-        unresolved = [
-            track.track_id for track in snapshot.tracks.values() if not track.accepted
-        ]
-        if unresolved:
-            raise ExportValidationError(
-                f"{len(unresolved)} track(s) still require reviewer confirmation"
+            warnings.append("The review contains no redaction tracks.")
+        unconfirmed = cls._unconfirmed_track_count(snapshot)
+        if unconfirmed:
+            warnings.append(
+                f"{unconfirmed} redaction track(s) were not individually "
+                "confirmed by a reviewer."
             )
-        missing_geometry = [
-            track.track_id
+        missing_geometry = sum(
+            1
             for track in snapshot.tracks.values()
             if track.active and track.redacted and not track.keyframes
-        ]
+        )
         if missing_geometry:
-            raise ExportValidationError("active redactions are missing geometry")
+            warnings.append(
+                f"{missing_geometry} active redaction(s) have no geometry "
+                "and will not be rendered."
+            )
+        if pending_suggestions:
+            warnings.append(
+                f"{pending_suggestions} context suggestion(s) were still "
+                "pending at export time."
+            )
+        return warnings
 
     def request(
         self,
@@ -141,18 +160,20 @@ class ExportService:
                 video_id,
                 expected_revision,
             )
-            self._validate_snapshot(snapshot)
-            pending_context = session.scalar(
-                select(func.count(ReprocessingSuggestion.id)).where(
-                    ReprocessingSuggestion.video_id == video_id,
-                    ReprocessingSuggestion.status
-                    == ReprocessingSuggestionStatus.PENDING,
+            pending_context = (
+                session.scalar(
+                    select(func.count(ReprocessingSuggestion.id)).where(
+                        ReprocessingSuggestion.video_id == video_id,
+                        ReprocessingSuggestion.status
+                        == ReprocessingSuggestionStatus.PENDING,
+                    )
                 )
+                or 0
             )
-            if pending_context:
-                raise ExportValidationError(
-                    f"{pending_context} context suggestion(s) still require reviewer confirmation"
-                )
+            review_warnings = self._review_warnings(
+                snapshot,
+                pending_suggestions=pending_context,
+            )
 
             export_id = new_id()
             artifact = ExportArtifact(
@@ -183,6 +204,7 @@ class ExportService:
                     "export_id": export_id,
                     "frozen_review_revision": expected_revision,
                     "redaction_style": style,
+                    "review_warnings": review_warnings,
                 },
                 reviewer_session_id=reviewer_session_id,
             )
@@ -190,7 +212,7 @@ class ExportService:
             session.commit()
 
         self.runner.enqueue(job.id)
-        return RequestedExport(artifact=artifact, job=job)
+        return RequestedExport(artifact=artifact, job=job, warnings=tuple(review_warnings))
 
     def execute(self, context: JobContext, job_id: str) -> None:
         with self.database.session() as session:
@@ -253,8 +275,21 @@ class ExportService:
             model_registry_sha256 = model_run.config_hash if model_run is not None else None
             video_id = video.id
             original_filename = video.original_filename
+            pending_context = (
+                session.scalar(
+                    select(func.count(ReprocessingSuggestion.id)).where(
+                        ReprocessingSuggestion.video_id == video.id,
+                        ReprocessingSuggestion.status
+                        == ReprocessingSuggestionStatus.PENDING,
+                    )
+                )
+                or 0
+            )
 
-        self._validate_snapshot(snapshot)
+        review_warnings = self._review_warnings(
+            snapshot,
+            pending_suggestions=pending_context,
+        )
         if fps <= 0 or expected_width <= 0 or expected_height <= 0:
             raise ExportValidationError("source media metadata is incomplete")
 
@@ -314,6 +349,7 @@ class ExportService:
                 if track.warning is not None
             }
         )
+        warnings.extend(review_warnings)
         if output_metadata.audio_present:
             warnings.append("Audio was preserved without redaction.")
         manifest = {
@@ -331,6 +367,7 @@ class ExportService:
             "review_revision": artifact.review_revision,
             "redaction_style": artifact.redaction_style,
             "action_count": action_count,
+            "unconfirmed_track_count": self._unconfirmed_track_count(snapshot),
             "redaction_track_counts": dict(sorted(track_counts.items())),
             "frames_rendered": rendered_video.frame_count,
             "video_encoder": rendered_video.encoder_name,

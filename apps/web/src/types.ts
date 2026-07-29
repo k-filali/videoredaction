@@ -17,6 +17,7 @@ export type ReprocessingSuggestionStatus = "PENDING" | "ACCEPTED" | "DISMISSED";
 
 export type ReviewActionType =
   | "ACCEPT_PROPOSAL"
+  | "BULK_ACCEPT"
   | "RESTORE_TRACK"
   | "REDACT_TRACK"
   | "DELETE_FALSE_POSITIVE"
@@ -243,4 +244,5 @@ export interface ExportArtifact {
 export interface ExportAccepted {
   export: ExportArtifact;
   job: ProcessingJob;
+  warnings: string[];
 }

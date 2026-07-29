@@ -512,3 +512,193 @@ def test_review_is_blocked_during_processing(tmp_path: Path) -> None:
                 reviewer_session_id="reviewer-a",
             )
         assert session.query(ReviewAction).count() == 0
+
+
+def seed_extra_track(
+    database: Database,
+    video_id: str,
+    *,
+    class_name: str,
+    mean_confidence: float,
+    start_ms: int = 0,
+    end_ms: int = 1000,
+) -> str:
+    with database.session() as session:
+        track = Track(
+            video_id=video_id,
+            class_name=class_name,
+            start_frame=0,
+            end_frame=10,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            source=TrackSource.MODEL,
+            confidence_summary={"mean": mean_confidence},
+        )
+        session.add(track)
+        session.flush()
+        session.add(
+            TrackKeyframe(
+                track_id=track.id,
+                frame_index=0,
+                timestamp_ms=start_ms,
+                x1=0.5,
+                y1=0.5,
+                x2=0.6,
+                y2=0.6,
+                source=TrackSource.MODEL,
+            )
+        )
+        session.commit()
+        return track.id
+
+
+def test_bulk_accept_scopes_to_class_and_records_one_action(tmp_path: Path) -> None:
+    database = create_database(tmp_path / "bulk-class.db")
+    video_id, plate_id = seed_video(database)
+    face_id = seed_extra_track(
+        database,
+        video_id,
+        class_name="face",
+        mean_confidence=0.55,
+    )
+
+    with database.session() as session:
+        action, snapshot = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.BULK_ACCEPT,
+                expected_revision=0,
+                payload={"class_name": "license_plate"},
+            ),
+            reviewer_session_id="reviewer-a",
+        )
+
+    assert action.revision == 1
+    assert snapshot.tracks[plate_id].accepted is True
+    assert snapshot.tracks[face_id].accepted is False
+    assert [
+        state["track_id"] for state in action.after_state["tracks"]
+    ] == [plate_id]
+
+    with database.session() as session:
+        _, snapshot = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.BULK_ACCEPT,
+                expected_revision=1,
+            ),
+            reviewer_session_id="reviewer-a",
+        )
+    assert snapshot.tracks[face_id].accepted is True
+
+    with (
+        database.session() as session,
+        pytest.raises(ReviewError, match="no unconfirmed tracks"),
+    ):
+        append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.BULK_ACCEPT,
+                expected_revision=2,
+            ),
+            reviewer_session_id="reviewer-a",
+        )
+
+
+def test_bulk_accept_confidence_and_time_filters(tmp_path: Path) -> None:
+    database = create_database(tmp_path / "bulk-filters.db")
+    video_id, confident_id = seed_video(database)
+    hesitant_id = seed_extra_track(
+        database,
+        video_id,
+        class_name="license_plate",
+        mean_confidence=0.40,
+    )
+    late_id = seed_extra_track(
+        database,
+        video_id,
+        class_name="face",
+        mean_confidence=0.95,
+        start_ms=5000,
+        end_ms=6000,
+    )
+
+    with database.session() as session:
+        _, snapshot = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.BULK_ACCEPT,
+                expected_revision=0,
+                payload={"min_confidence": 0.9, "start_ms": 0, "end_ms": 2000},
+            ),
+            reviewer_session_id="reviewer-a",
+        )
+
+    assert snapshot.tracks[confident_id].accepted is True
+    assert snapshot.tracks[hesitant_id].accepted is False
+    assert snapshot.tracks[late_id].accepted is False
+
+    with database.session() as session:
+        with pytest.raises(ReviewError, match="min_confidence"):
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.BULK_ACCEPT,
+                    expected_revision=1,
+                    payload={"min_confidence": 1.5},
+                ),
+                reviewer_session_id="reviewer-a",
+            )
+        with pytest.raises(ReviewError, match="start_ms and end_ms"):
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.BULK_ACCEPT,
+                    expected_revision=1,
+                    payload={"start_ms": 100},
+                ),
+                reviewer_session_id="reviewer-a",
+            )
+
+
+def test_bulk_accept_can_be_undone(tmp_path: Path) -> None:
+    database = create_database(tmp_path / "bulk-undo.db")
+    video_id, plate_id = seed_video(database)
+    face_id = seed_extra_track(
+        database,
+        video_id,
+        class_name="face",
+        mean_confidence=0.7,
+    )
+
+    with database.session() as session:
+        bulk_action, _ = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.BULK_ACCEPT,
+                expected_revision=0,
+            ),
+            reviewer_session_id="reviewer-a",
+        )
+
+    with database.session() as session:
+        _, snapshot = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.UNDO,
+                expected_revision=1,
+                payload={"action_id": bulk_action.id},
+            ),
+            reviewer_session_id="reviewer-a",
+        )
+
+    assert snapshot.tracks[plate_id].accepted is False
+    assert snapshot.tracks[face_id].accepted is False

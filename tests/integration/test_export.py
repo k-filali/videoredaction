@@ -33,7 +33,6 @@ from clearframe.models import (
     VideoAsset,
 )
 from clearframe.services.container import ServiceContainer
-from clearframe.services.export import ExportValidationError
 from clearframe.services.review import append_review_action
 from clearframe.storage import LocalStorage
 
@@ -332,43 +331,50 @@ def test_failed_encoder_attempts_leave_no_export_artifact(
     assert list(export_path.parent.glob("*.part.mp4")) == []
 
 
-def test_unresolved_proposal_rejects_export(
+def test_unconfirmed_tracks_export_with_recorded_warning(
     export_environment: tuple[Database, ServiceContainer, str, str, str],
 ) -> None:
     database, services, video_id, _, original_sha256 = export_environment
 
-    with pytest.raises(
-        ExportValidationError,
-        match="still require reviewer confirmation",
-    ):
-        services.export.request(
-            video_id,
-            expected_revision=0,
-            style=RedactionStyle.BLACK_BOX,
-            reviewer_session_id="reviewer-export-test",
-        )
+    requested = services.export.request(
+        video_id,
+        expected_revision=0,
+        style=RedactionStyle.BLACK_BOX,
+        reviewer_session_id="reviewer-export-test",
+    )
+    assert any("not individually confirmed" in warning for warning in requested.warnings)
+    services.runner.wait(requested.job.id, timeout=120)
 
     with database.session() as session:
+        artifact = session.get(ExportArtifact, requested.artifact.id)
         video = session.get(VideoAsset, video_id)
-        artifacts = list(
-            session.scalars(
-                select(ExportArtifact).where(ExportArtifact.video_id == video_id)
+        request_action = session.scalar(
+            select(ReviewAction).where(
+                ReviewAction.video_id == video_id,
+                ReviewAction.action_type == ReviewActionType.EXPORT_REQUESTED,
             )
         )
-        export_jobs = list(
-            session.scalars(
-                select(ProcessingJob).where(ProcessingJob.export_id.is_not(None))
-            )
-        )
+        assert artifact is not None
         assert video is not None
+        assert request_action is not None
+        assert artifact.status == ExportStatus.COMPLETED
         assert video.original_uri is not None
-        assert video.status == VideoStatus.READY_FOR_REVIEW
-        assert artifacts == []
-        assert export_jobs == []
-        assert sha256_file(local_storage(services).path_for(video.original_uri)) == original_sha256
+        assert artifact.manifest_uri is not None
+        assert any(
+            "not individually confirmed" in warning
+            for warning in request_action.after_state["review_warnings"]
+        )
+        manifest_path = local_storage(services).path_for(artifact.manifest_uri)
+        original_path = local_storage(services).path_for(video.original_uri)
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["unconfirmed_track_count"] == 1
+    assert any("not individually confirmed" in warning for warning in manifest["warnings"])
+    assert manifest["redaction_track_counts"] == {"license_plate": 1}
+    assert sha256_file(original_path) == original_sha256
 
 
-def test_pending_context_suggestion_rejects_export(
+def test_pending_context_suggestion_exports_with_warning(
     export_environment: tuple[Database, ServiceContainer, str, str, str],
 ) -> None:
     database, services, video_id, track_id, _ = export_environment
@@ -414,13 +420,21 @@ def test_pending_context_suggestion_rejects_export(
         )
         session.commit()
 
-    with pytest.raises(
-        ExportValidationError,
-        match=r"context suggestion.*still require reviewer confirmation",
-    ):
-        services.export.request(
-            video_id,
-            expected_revision=1,
-            style=RedactionStyle.BLACK_BOX,
-            reviewer_session_id="reviewer-export-test",
-        )
+    requested = services.export.request(
+        video_id,
+        expected_revision=1,
+        style=RedactionStyle.BLACK_BOX,
+        reviewer_session_id="reviewer-export-test",
+    )
+    assert any("context suggestion" in warning for warning in requested.warnings)
+    services.runner.wait(requested.job.id, timeout=120)
+
+    with database.session() as session:
+        artifact = session.get(ExportArtifact, requested.artifact.id)
+        assert artifact is not None
+        assert artifact.status == ExportStatus.COMPLETED
+        assert artifact.manifest_uri is not None
+        manifest_path = local_storage(services).path_for(artifact.manifest_uri)
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert any("context suggestion" in warning for warning in manifest["warnings"])

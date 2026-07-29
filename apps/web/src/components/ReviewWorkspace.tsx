@@ -50,6 +50,11 @@ const classColours: Record<string, string> = {
 
 const exportFinished = new Set(["COMPLETED", "FAILED"]);
 
+const detectionKitOptions = [
+  { id: "yolov9t-plate", label: "License plates" },
+  { id: "yunet-face", label: "Faces" },
+];
+
 function classLabel(value: string): string {
   if (value === "license_plate") return "License plate";
   return value.charAt(0).toUpperCase() + value.slice(1).replaceAll("_", " ");
@@ -272,6 +277,10 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
   const [spanEndMs, setSpanEndMs] = useState(0);
   const [auditOpen, setAuditOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [exportWarnings, setExportWarnings] = useState<string[]>([]);
+  const [detectionKits, setDetectionKits] = useState<Set<string>>(
+    new Set(detectionKitOptions.map((option) => option.id)),
+  );
   const [exporting, setExporting] = useState(false);
   const [exportPollError, setExportPollError] = useState<string | null>(null);
   const [artifact, setArtifact] = useState<ExportArtifact | null>(null);
@@ -665,20 +674,28 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
 
   const acceptVisible = useCallback(async () => {
     if (!snapshot || mutationBusy) return;
-    const pending = filteredTracks.filter((track) => !track.accepted);
+    const scopedClasses = [...classFilters];
+    const pending = tracks.filter(
+      (track) =>
+        !track.accepted &&
+        (scopedClasses.length === 0 || classFilters.has(track.class_name)),
+    );
     if (pending.length === 0) {
-      onNotify("Every visible proposal already has a decision.", "info");
+      onNotify("Every proposal in this scope already has a decision.", "info");
       return;
     }
     setMutationBusy(true);
     let current = snapshot;
     const newActions: AuditAction[] = [];
     try {
-      for (const track of pending) {
-        const result = await api.updateTrack(videoId, track.track_id, {
-          action_type: "ACCEPT_PROPOSAL",
+      const scopes: (string | null)[] =
+        scopedClasses.length === 0 ? [null] : scopedClasses;
+      for (const className of scopes) {
+        const result = await api.createReviewAction(videoId, {
+          action_type: "BULK_ACCEPT",
           expected_revision: current.revision,
-          payload: {},
+          reason_code: "reviewer_bulk_accept",
+          payload: className ? { class_name: className } : {},
         });
         current = result.state;
         newActions.push(result.action);
@@ -691,7 +708,10 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
           ? { ...existing, revision: current.revision, actions: [...existing.actions, ...newActions] }
           : existing,
       );
-      onNotify(`${pending.length} visible ${pending.length === 1 ? "track" : "tracks"} accepted.`, "success");
+      onNotify(
+        `${pending.length} ${pending.length === 1 ? "track" : "tracks"} accepted in one auditable action.`,
+        "success",
+      );
     } catch (mutationError) {
       await handleMutationFailure(mutationError);
     } finally {
@@ -699,11 +719,12 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
     }
   }, [
     applySnapshot,
-    filteredTracks,
+    classFilters,
     handleMutationFailure,
     mutationBusy,
     onNotify,
     snapshot,
+    tracks,
     videoId,
   ]);
 
@@ -799,7 +820,7 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
         video.review_revision === 0
       ) {
         try {
-          await api.processVideo(videoId);
+          await api.processVideo(videoId, 5, [...detectionKits]);
         } catch (requestError) {
           if (!(requestError instanceof ApiError) || requestError.status !== 409) {
             throw requestError;
@@ -844,6 +865,7 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
     }
   }, [
     detectionBusy,
+    detectionKits,
     loadAudit,
     onNotify,
     reloadSnapshot,
@@ -977,6 +999,7 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
       return;
     }
     setArtifact(accepted.export);
+    setExportWarnings(accepted.warnings ?? []);
     onNotify("Export started from a frozen review revision.", "success");
     void reloadSnapshot().catch(() => {
       onNotify(
@@ -1167,11 +1190,12 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
           <button
             className="button button-primary"
             type="button"
-            disabled={tracks.length === 0 || detectionBusy}
+            disabled={detectionBusy}
             onClick={() => {
               if (!artifact || exportFinished.has(artifact.status)) {
                 setArtifact(null);
                 setExportPollError(null);
+                setExportWarnings([]);
               }
               setExportOpen(true);
             }}
@@ -1273,15 +1297,37 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
                     : "Inspect the clip and add any missed region manually."}
                 </p>
                 {video.active_model_run_id === null && video.review_revision === 0 ? (
-                  <button
-                    type="button"
-                    onClick={() => void runDetection()}
-                    disabled={detectionBusy}
-                  >
-                    {detectionBusy || video.status === "PROCESSING"
-                      ? "Detection running…"
-                      : "Run detection"}
-                  </button>
+                  <>
+                    <div className="detection-kit-picker">
+                      {detectionKitOptions.map((option) => (
+                        <label key={option.id}>
+                          <input
+                            type="checkbox"
+                            checked={detectionKits.has(option.id)}
+                            disabled={detectionBusy}
+                            onChange={() =>
+                              setDetectionKits((current) => {
+                                const next = new Set(current);
+                                if (next.has(option.id)) next.delete(option.id);
+                                else next.add(option.id);
+                                return next;
+                              })
+                            }
+                          />
+                          {option.label}
+                        </label>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void runDetection()}
+                      disabled={detectionBusy || detectionKits.size === 0}
+                    >
+                      {detectionBusy || video.status === "PROCESSING"
+                        ? "Detection running…"
+                        : "Run detection"}
+                    </button>
+                  </>
                 ) : (
                   <button type="button" onClick={toggleManualMode}>
                     Add manual region
@@ -1318,9 +1364,19 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
               <Icon name="arrow-right" size={15} />
               Next unresolved
             </button>
-            <button className="button button-secondary" type="button" onClick={() => void acceptVisible()} disabled={mutationBusy}>
+            <button
+              className="button button-secondary"
+              type="button"
+              onClick={() => void acceptVisible()}
+              disabled={mutationBusy}
+              title={
+                classFilters.size > 0
+                  ? "Accept every unconfirmed track in the filtered classes as one auditable action"
+                  : "Accept every unconfirmed track as one auditable action"
+              }
+            >
               <Icon name="check" size={15} />
-              Accept visible
+              {classFilters.size > 0 ? "Accept filtered" : "Accept remaining"}
             </button>
           </div>
         </aside>
@@ -1815,6 +1871,7 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
         open={exportOpen}
         unresolvedCount={unresolvedCount}
         pendingSuggestionCount={pendingContextCount}
+        warnings={exportWarnings}
         audioPresent={video.audio_present === true}
         revision={snapshot.revision}
         style={previewStyle}

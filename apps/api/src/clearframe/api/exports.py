@@ -97,6 +97,7 @@ def request_export(
     return ExportAccepted(
         export=ExportRead.from_model(requested.artifact),
         job=JobRead.from_model(requested.job),
+        warnings=list(requested.warnings),
     )
 
 

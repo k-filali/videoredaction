@@ -16,6 +16,7 @@ const actionCopy: Record<
   { title: string; icon: IconName; tone: string }
 > = {
   ACCEPT_PROPOSAL: { title: "Proposal accepted", icon: "check", tone: "success" },
+  BULK_ACCEPT: { title: "Bulk accept", icon: "check", tone: "success" },
   RESTORE_TRACK: { title: "Region restored", icon: "eye", tone: "neutral" },
   REDACT_TRACK: { title: "Redaction enabled", icon: "eye-off", tone: "success" },
   DELETE_FALSE_POSITIVE: { title: "False positive removed", icon: "trash", tone: "neutral" },

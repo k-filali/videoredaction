@@ -82,8 +82,13 @@ suppression, links detections with motion-aware tracking, and interpolates short
 The plate model is distributed by
 [Open Image Models](https://github.com/ankandrew/open-image-models) under the MIT licence. The face
 model is distributed by [OpenCV Zoo](https://github.com/opencv/opencv_zoo) under the MIT licence.
-Reviewer decisions remain mandatory: automatic proposals can still be missed or incorrect on
-unfamiliar footage.
+
+Review follows a review-by-exception model: detected regions are redacted by default, reviewers
+resolve flagged exceptions or reject false positives, and bulk accept actions are recorded as
+single auditable events. Export is never blocked — any unconfirmed tracks or pending context
+suggestions at export time are recorded as warnings in the export manifest and audit log.
+Automatic proposals can still be missed or incorrect on unfamiliar footage, so a full
+watch-through remains the reviewer's responsibility.
 
 ## Development setup
 
@@ -141,6 +146,7 @@ tests/           Unit, integration, and end-to-end tests
 
 - Automatic detection quality varies with camera motion, lighting, occlusion, distance, and plate
   style, so every proposal and uncovered interval still requires review.
-- The included Compose profile uses SQLite, local volumes, and an in-process dispatcher.
-- Uploads are not chunked or resumable.
+- The included Compose profile uses SQLite, local volumes, and an in-process dispatcher. The
+  Google Cloud deployment in `infra/gcp` uses PostgreSQL, Cloud Storage with resumable uploads,
+  and Cloud Run jobs (including on-demand GPU detection).
 - Redaction applies to video frames only. Source audio is copied to the export unchanged.

@@ -191,6 +191,62 @@ def _redaction_class(value: object) -> RedactionClass:
         raise ReviewError("class_name is not a supported redaction class") from exc
 
 
+def _bulk_accept_targets(
+    snapshot: ReviewSnapshot,
+    command: ReviewCommand,
+) -> list[TrackReviewState]:
+    class_filter: RedactionClass | None = None
+    raw_class = command.payload.get("class_name")
+    if raw_class is not None:
+        class_filter = _redaction_class(raw_class)
+
+    min_confidence: float | None = None
+    raw_confidence = command.payload.get("min_confidence")
+    if raw_confidence is not None:
+        if isinstance(raw_confidence, bool) or not isinstance(
+            raw_confidence, int | float
+        ):
+            raise ReviewError("min_confidence must be a number between 0 and 1")
+        min_confidence = float(raw_confidence)
+        if not 0.0 <= min_confidence <= 1.0:
+            raise ReviewError("min_confidence must be a number between 0 and 1")
+
+    start_ms = command.payload.get("start_ms")
+    end_ms = command.payload.get("end_ms")
+    if (start_ms is None) != (end_ms is None):
+        raise ReviewError("time-scoped bulk accept requires both start_ms and end_ms")
+    if (start_ms is not None and end_ms is not None) and (
+        isinstance(start_ms, bool)
+        or isinstance(end_ms, bool)
+        or not isinstance(start_ms, int)
+        or not isinstance(end_ms, int)
+        or start_ms < 0
+        or end_ms < start_ms
+    ):
+        raise ReviewError("bulk accept time range is invalid")
+
+    targets = []
+    for state in snapshot.tracks.values():
+        if state.accepted:
+            continue
+        if class_filter is not None and state.class_name != class_filter:
+            continue
+        if min_confidence is not None and (
+            state.confidence is None or state.confidence < min_confidence
+        ):
+            continue
+        if (
+            start_ms is not None
+            and end_ms is not None
+            and (state.end_ms < start_ms or state.start_ms > end_ms)
+        ):
+            continue
+        targets.append(state)
+    if not targets:
+        raise ReviewError("no unconfirmed tracks match the requested scope")
+    return sorted(targets, key=lambda state: state.track_id)
+
+
 def _validate_video_bounds(
     video: VideoAsset,
     states: list[TrackReviewState],
@@ -249,6 +305,16 @@ def _updated_states(
             raise ReviewError("manual region has an invalid track span") from exc
         command.track_id = track_id
         return [], [created], inverse_of
+
+    if action_type == ReviewActionType.BULK_ACCEPT:
+        targets = _bulk_accept_targets(snapshot, command)
+        before = [state.model_copy(deep=True) for state in targets]
+        after = []
+        for state in targets:
+            accepted = state.model_copy(deep=True)
+            accepted.accepted = True
+            after.append(_validated_state(accepted))
+        return before, after, inverse_of
 
     if action_type in {ReviewActionType.UNDO, ReviewActionType.REDO}:
         raise ReviewError("undo and redo must be resolved by the review service")

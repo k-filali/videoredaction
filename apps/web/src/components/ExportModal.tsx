@@ -7,6 +7,7 @@ interface ExportModalProps {
   open: boolean;
   unresolvedCount: number;
   pendingSuggestionCount: number;
+  warnings: string[];
   audioPresent: boolean;
   revision: number;
   style: RedactionStyle;
@@ -29,6 +30,7 @@ export function ExportModal({
   open,
   unresolvedCount,
   pendingSuggestionCount,
+  warnings,
   audioPresent,
   revision,
   style,
@@ -57,7 +59,7 @@ export function ExportModal({
   const complete = artifact?.status === "COMPLETED";
   const failed = artifact?.status === "FAILED";
   const interrupted = Boolean(pollError && artifact && !complete && !failed);
-  const blockingCount = unresolvedCount + pendingSuggestionCount;
+  const pendingCount = unresolvedCount + pendingSuggestionCount;
   const progress =
     artifact?.status === "VERIFYING"
       ? 88
@@ -100,6 +102,16 @@ export function ExportModal({
             <span className="complete-mark"><Icon name="check" size={28} /></span>
             <h3>Your redacted copy is ready</h3>
             <p>The output was rendered from frozen revision {artifact.review_revision} and verified.</p>
+            {warnings.length > 0 && (
+              <ul className="export-warning-list">
+                {warnings.map((warning) => (
+                  <li key={warning}>
+                    <Icon name="warning" size={13} />
+                    {warning}
+                  </li>
+                ))}
+              </ul>
+            )}
             {audioPresent && (
               <p className="audio-export-warning">
                 Audio content was carried into the export without review or redaction and may be
@@ -169,32 +181,34 @@ export function ExportModal({
         ) : (
           <>
             <div className="export-readiness">
-              <span className={blockingCount === 0 ? "ready" : "blocked"}>
-                <Icon name={blockingCount === 0 ? "check" : "warning"} size={17} />
+              <span className={pendingCount === 0 ? "ready" : "blocked"}>
+                <Icon name={pendingCount === 0 ? "check" : "warning"} size={17} />
               </span>
               <div>
                 <strong>
-                  {blockingCount === 0
+                  {pendingCount === 0
                     ? "Review is ready to export"
                     : "Review decisions are still pending"}
                 </strong>
                 <p>
-                  {blockingCount === 0
+                  {pendingCount === 0
                     ? `Revision ${revision} will be frozen for this render.`
                     : [
                         unresolvedCount > 0
-                          ? `${unresolvedCount} track${
+                          ? `${unresolvedCount} unconfirmed track${
                               unresolvedCount === 1 ? "" : "s"
                             }`
                           : "",
                         pendingSuggestionCount > 0
-                          ? `${pendingSuggestionCount} context suggestion${
+                          ? `${pendingSuggestionCount} pending context suggestion${
                               pendingSuggestionCount === 1 ? "" : "s"
                             }`
                           : "",
                       ]
                         .filter(Boolean)
-                        .join(" and ") + " must be reviewed before export."}
+                        .join(" and ") +
+                      " will be recorded as warnings in the export manifest. " +
+                      "Detected tracks are redacted by default."}
                 </p>
               </div>
             </div>
@@ -250,9 +264,7 @@ export function ExportModal({
               <button
                 className="button button-primary"
                 type="button"
-                disabled={
-                  blockingCount > 0 || (audioPresent && !audioAcknowledged)
-                }
+                disabled={audioPresent && !audioAcknowledged}
                 onClick={onExport}
               >
                 <Icon name="download" size={16} />

@@ -319,3 +319,4 @@ class ExportRead(BaseModel):
 class ExportAccepted(BaseModel):
     export: ExportRead
     job: JobRead
+    warnings: list[str] = Field(default_factory=list)

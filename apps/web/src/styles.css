@@ -2106,6 +2106,161 @@ kbd {
   background: #f1bd68;
 }
 
+.exception-strip-label {
+  display: flex;
+  height: 1.15rem;
+  align-items: center;
+  gap: 0.28rem;
+  padding-left: 0.5rem;
+  border-bottom: 1px solid rgba(180, 205, 197, 0.055);
+  color: #8a7648;
+  font-size: 0.46rem;
+  text-transform: uppercase;
+}
+
+.timeline-lane.exception-strip {
+  height: 1.15rem;
+  background-image: none;
+  background: rgba(241, 189, 104, 0.03);
+}
+
+.exception-marker {
+  position: absolute;
+  z-index: 3;
+  top: 0.28rem;
+  width: 0.34rem;
+  height: 0.58rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.1rem;
+  background: color-mix(in srgb, var(--marker-color) 75%, #f1bd68);
+  cursor: pointer;
+  transform: translateX(-50%);
+}
+
+.exception-marker:hover,
+.exception-marker:focus-visible {
+  outline: 2px solid rgba(241, 189, 104, 0.5);
+  outline-offset: 1px;
+}
+
+.class-lane-label em {
+  margin-left: auto;
+  color: #52635e;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.44rem;
+  font-style: normal;
+}
+
+.class-lane-label svg {
+  flex: 0 0 auto;
+  color: #52635e;
+  transition: transform 0.15s ease;
+}
+
+.class-lane-label.is-expanded svg {
+  transform: rotate(180deg);
+}
+
+.class-lane-label.is-expanded {
+  color: #a9bab4;
+  background: rgba(101, 217, 180, 0.05);
+}
+
+.detail-lane-label {
+  padding-left: 1rem !important;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.44rem !important;
+}
+
+.detail-lane-label i.is-pending {
+  box-shadow: 0 0 0 2px rgba(241, 189, 104, 0.35);
+}
+
+.timeline-lane.is-detail {
+  background: rgba(180, 205, 197, 0.02);
+}
+
+.class-segment {
+  position: absolute;
+  top: 0.3rem;
+  display: flex;
+  height: 0.9rem;
+  min-width: 4px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--track-color) 50%, transparent);
+  border-radius: 0.22rem;
+  background: color-mix(in srgb, var(--track-color) 26%, #0a1210);
+  cursor: pointer;
+}
+
+.class-segment:hover,
+.class-segment:focus-visible {
+  border-color: var(--track-color);
+  background: color-mix(in srgb, var(--track-color) 38%, #0a1210);
+}
+
+.class-segment.has-pending {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--track-color) 60%, #f1bd68);
+}
+
+.segment-count {
+  overflow: hidden;
+  padding: 0 0.2rem;
+  color: #cfe0da;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.44rem;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.detection-kit-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  align-items: flex-start;
+  margin: 0.4rem 0;
+}
+
+.detection-kit-picker label {
+  display: flex;
+  align-items: center;
+  gap: 0.34rem;
+  color: #8fa19b;
+  cursor: pointer;
+  font-size: 0.58rem;
+}
+
+.export-warning-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  width: 100%;
+  margin: 0.2rem 0 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid rgba(241, 189, 104, 0.25);
+  border-radius: 0.35rem;
+  background: rgba(241, 189, 104, 0.06);
+  list-style: none;
+}
+
+.export-warning-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  color: #d9c69a;
+  font-size: 0.55rem;
+  text-align: left;
+}
+
+.export-warning-list li svg {
+  flex: 0 0 auto;
+  margin-top: 0.08rem;
+}
+
 .timeline-playhead {
   position: absolute;
   z-index: 5;

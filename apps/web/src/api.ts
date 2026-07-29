@@ -123,10 +123,13 @@ export const api = {
 
   getAudit: (videoId: string) => request<AuditLog>(`/api/videos/${videoId}/audit`),
 
-  processVideo: (videoId: string, sampleEveryFrames = 5) =>
+  processVideo: (videoId: string, sampleEveryFrames = 5, modelIds?: string[]) =>
     request<ProcessingAccepted>(`/api/videos/${videoId}/process`, {
       method: "POST",
-      body: JSON.stringify({ sample_every_frames: sampleEveryFrames }),
+      body: JSON.stringify({
+        sample_every_frames: sampleEveryFrames,
+        ...(modelIds && modelIds.length > 0 ? { model_ids: modelIds } : {}),
+      }),
     }),
 
   getLatestModelRun: (videoId: string) =>
