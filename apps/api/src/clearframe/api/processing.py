@@ -142,6 +142,10 @@ def get_latest_model_run(
 
 
 @router.get(
+    "/{video_id}/metrics",
+    response_model=ModelRunMetricsRead,
+)
+@router.get(
     "/{video_id}/model-runs/latest/metrics",
     response_model=ModelRunMetricsRead,
 )

@@ -76,6 +76,9 @@ def test_processing_api_returns_latest_run_and_metrics(tmp_path: Path) -> None:
             assert metrics.json()["model_run_id"] == payload["run"]["id"]
             assert metrics.json()["metrics"]["tracks"] == 1
 
+            metrics_alias = await client.get(f"/api/videos/{video_id}/metrics")
+            assert metrics_alias.json() == metrics.json()
+
             missing = await client.get("/api/videos/missing/model-runs/latest")
             assert missing.status_code == 404
 

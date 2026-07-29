@@ -36,6 +36,7 @@ class VideoRead(BaseModel):
     original_sha256: str | None
     status: VideoStatus
     review_revision: int
+    active_model_run_id: str | None
     proxy_url: str | None
     thumbnail_url: str | None
     error_message: str | None
@@ -58,6 +59,7 @@ class VideoRead(BaseModel):
             original_sha256=video.original_sha256,
             status=VideoStatus(video.status),
             review_revision=video.review_revision,
+            active_model_run_id=video.active_model_run_id,
             proxy_url=f"/api/videos/{video.id}/proxy" if video.proxy_uri else None,
             thumbnail_url=f"/api/videos/{video.id}/thumbnail" if video.thumbnail_uri else None,
             error_message=video.error_message,
