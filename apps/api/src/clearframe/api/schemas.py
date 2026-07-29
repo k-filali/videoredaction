@@ -1,9 +1,12 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
-from clearframe.domain.enums import JobStatus, JobType, VideoStatus
-from clearframe.models import ProcessingJob, VideoAsset
+from clearframe.domain.enums import JobStatus, JobType, ReviewActionType, VideoStatus
+from clearframe.domain.geometry import NormalizedBox
+from clearframe.domain.review import ReviewSnapshot
+from clearframe.models import ProcessingJob, ReviewAction, VideoAsset
 
 
 class VideoRead(BaseModel):
@@ -91,4 +94,66 @@ class VideoStatusRead(BaseModel):
 class VideoList(BaseModel):
     items: list[VideoRead]
     total: int
+
+
+class ManualRegionCreate(BaseModel):
+    expected_revision: int = Field(ge=0)
+    frame_index: int = Field(ge=0)
+    timestamp_ms: int = Field(ge=0)
+    class_name: str = Field(default="license_plate", min_length=1, max_length=48)
+    bbox: NormalizedBox
+    start_frame: int | None = Field(default=None, ge=0)
+    end_frame: int | None = Field(default=None, ge=0)
+    start_ms: int | None = Field(default=None, ge=0)
+    end_ms: int | None = Field(default=None, ge=0)
+    reason_code: str | None = Field(default=None, max_length=64)
+
+
+class AuditActionRead(BaseModel):
+    id: str
+    video_id: str
+    track_id: str | None
+    frame_index: int | None
+    timestamp_ms: int | None
+    action_type: ReviewActionType
+    before_state: dict[str, Any]
+    after_state: dict[str, Any]
+    reason_code: str | None
+    reviewer_session_id: str
+    revision: int
+    model_version: str | None
+    application_version: str
+    inverse_of_action_id: str | None
+    created_at: datetime
+
+    @classmethod
+    def from_model(cls, action: ReviewAction) -> "AuditActionRead":
+        return cls(
+            id=action.id,
+            video_id=action.video_id,
+            track_id=action.track_id,
+            frame_index=action.frame_index,
+            timestamp_ms=action.timestamp_ms,
+            action_type=ReviewActionType(action.action_type),
+            before_state=action.before_state,
+            after_state=action.after_state,
+            reason_code=action.reason_code,
+            reviewer_session_id=action.reviewer_session_id,
+            revision=action.revision,
+            model_version=action.model_version,
+            application_version=action.application_version,
+            inverse_of_action_id=action.inverse_of_action_id,
+            created_at=action.created_at,
+        )
+
+
+class ReviewMutationRead(BaseModel):
+    action: AuditActionRead
+    state: ReviewSnapshot
+
+
+class AuditLogRead(BaseModel):
+    video_id: str
+    revision: int
+    actions: list[AuditActionRead]
 
