@@ -662,7 +662,7 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
           }
         }
       }
-      for (let attempt = 0; attempt < 600; attempt += 1) {
+      while (true) {
         const status = await api.getVideoStatus(videoId);
         setVideo(status.video);
         if (status.video.status === "FAILED") {
@@ -690,7 +690,6 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
         }
         await new Promise((resolve) => window.setTimeout(resolve, 700));
       }
-      throw new Error("Detection is still running. You can safely return to the dashboard.");
     } catch (detectionError) {
       onNotify(
         detectionError instanceof Error ? detectionError.message : "Detection failed",

@@ -196,9 +196,8 @@ export function Dashboard({ onOpenVideo, onNotify }: DashboardProps) {
   }, [loadVideos, videos]);
 
   const prepareForReview = useCallback(async (videoId: string): Promise<VideoAsset> => {
-    const deadline = Date.now() + 10 * 60 * 1000;
     let detectionRequested = false;
-    while (Date.now() < deadline) {
+    while (true) {
       const status = await api.getVideoStatus(videoId);
       const latest = status.video;
       setVideos((current) => [
@@ -228,7 +227,6 @@ export function Dashboard({ onOpenVideo, onNotify }: DashboardProps) {
       }
       await new Promise((resolve) => window.setTimeout(resolve, 700));
     }
-    throw new Error("Processing timed out. The video remains available on this device.");
   }, []);
 
   const runDetection = useCallback(

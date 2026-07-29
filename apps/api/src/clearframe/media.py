@@ -263,7 +263,7 @@ class MediaProcessor:
                 "+faststart",
                 str(destination),
             ],
-            timeout=1800,
+            timeout=14400,
             failure_message="proxy generation failed",
         )
         self.probe(destination)

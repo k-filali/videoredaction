@@ -6,13 +6,14 @@ services:
       context: .
       dockerfile: docker/api.Dockerfile
     environment:
-      CLEARFRAME_ENV: demo
+      CLEARFRAME_ENV: local
       CLEARFRAME_API_HOST: 0.0.0.0
       CLEARFRAME_ACCESS_TOKEN: ${CLEARFRAME_ACCESS_TOKEN:?Set CLEARFRAME_ACCESS_TOKEN before starting ClearFrame}
       CLEARFRAME_DATABASE_URL: sqlite:////app/data/clearframe.db
       CLEARFRAME_STORAGE_ROOT: /app/storage
       CLEARFRAME_WEB_ORIGIN: http://localhost:5173
       CLEARFRAME_BUILD_ID: ${CLEARFRAME_BUILD_ID:-local-compose}
+      TMPDIR: /app/storage/tmp/multipart
     volumes:
       - clearframe-data:/app/data
       - clearframe-storage:/app/storage
