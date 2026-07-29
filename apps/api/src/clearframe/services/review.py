@@ -7,7 +7,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from clearframe import __version__
-from clearframe.domain.enums import ReviewActionType, TrackSource
+from clearframe.domain.enums import ReviewActionType, TrackSource, VideoStatus
 from clearframe.domain.geometry import NormalizedBox
 from clearframe.domain.review import (
     ReviewCommand,
@@ -35,6 +35,10 @@ class RevisionConflictError(ReviewError):
         super().__init__(f"review revision conflict: expected {expected}, current {actual}")
         self.expected = expected
         self.actual = actual
+
+
+class ReviewUnavailableError(ReviewError):
+    pass
 
 
 def _state_payload(
@@ -149,6 +153,26 @@ def _bbox_from_payload(command: ReviewCommand) -> NormalizedBox:
         raise ReviewError("payload must include a valid normalized bbox") from exc
 
 
+def _integer_from_payload(
+    command: ReviewCommand,
+    key: str,
+    default: int,
+) -> int:
+    value = command.payload.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ReviewError(f"{key} must be an integer")
+    if value < 0:
+        raise ReviewError(f"{key} cannot be negative")
+    return cast(int, value)
+
+
+def _validated_state(state: TrackReviewState) -> TrackReviewState:
+    try:
+        return TrackReviewState.model_validate(state.model_dump())
+    except ValueError as exc:
+        raise ReviewError("review action would create an invalid track span") from exc
+
+
 def _updated_states(
     snapshot: ReviewSnapshot,
     command: ReviewCommand,
@@ -164,28 +188,31 @@ def _updated_states(
         if track_id in snapshot.tracks:
             raise ReviewError("manual track id already exists")
         class_name = str(command.payload.get("class_name", "license_plate"))
-        start_ms = int(command.payload.get("start_ms", command.timestamp_ms))
-        end_ms = int(command.payload.get("end_ms", command.timestamp_ms))
-        start_frame = int(command.payload.get("start_frame", command.frame_index))
-        end_frame = int(command.payload.get("end_frame", command.frame_index))
-        created = TrackReviewState(
-            track_id=track_id,
-            class_name=class_name,
-            source=TrackSource.MANUAL,
-            redacted=True,
-            accepted=True,
-            start_frame=start_frame,
-            end_frame=end_frame,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            keyframes=[
-                ReviewKeyframe(
-                    frame_index=command.frame_index,
-                    timestamp_ms=command.timestamp_ms,
-                    bbox=bbox,
-                )
-            ],
-        )
+        start_ms = _integer_from_payload(command, "start_ms", command.timestamp_ms)
+        end_ms = _integer_from_payload(command, "end_ms", command.timestamp_ms)
+        start_frame = _integer_from_payload(command, "start_frame", command.frame_index)
+        end_frame = _integer_from_payload(command, "end_frame", command.frame_index)
+        try:
+            created = TrackReviewState(
+                track_id=track_id,
+                class_name=class_name,
+                source=TrackSource.MANUAL,
+                redacted=True,
+                accepted=True,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                keyframes=[
+                    ReviewKeyframe(
+                        frame_index=command.frame_index,
+                        timestamp_ms=command.timestamp_ms,
+                        bbox=bbox,
+                    )
+                ],
+            )
+        except ValueError as exc:
+            raise ReviewError("manual region has an invalid track span") from exc
         command.track_id = track_id
         return [], [created], inverse_of
 
@@ -228,10 +255,10 @@ def _updated_states(
         updated.class_name = new_class_name
         updated.accepted = True
     elif action_type in {ReviewActionType.EXTEND_TRACK, ReviewActionType.TRIM_TRACK}:
-        start_ms = int(command.payload.get("start_ms", updated.start_ms))
-        end_ms = int(command.payload.get("end_ms", updated.end_ms))
-        start_frame = int(command.payload.get("start_frame", updated.start_frame))
-        end_frame = int(command.payload.get("end_frame", updated.end_frame))
+        start_ms = _integer_from_payload(command, "start_ms", updated.start_ms)
+        end_ms = _integer_from_payload(command, "end_ms", updated.end_ms)
+        start_frame = _integer_from_payload(command, "start_frame", updated.start_frame)
+        end_frame = _integer_from_payload(command, "end_frame", updated.end_frame)
         if start_ms > end_ms or start_frame > end_frame:
             raise ReviewError("track start cannot follow track end")
         updated.start_ms = start_ms
@@ -240,8 +267,8 @@ def _updated_states(
         updated.end_frame = end_frame
         updated.accepted = True
     elif action_type == ReviewActionType.SPLIT_TRACK:
-        split_ms = int(command.payload.get("split_ms", -1))
-        split_frame = int(command.payload.get("split_frame", -1))
+        split_ms = _integer_from_payload(command, "split_ms", -1)
+        split_frame = _integer_from_payload(command, "split_frame", -1)
         if not (
             updated.start_ms < split_ms < updated.end_ms
             and updated.start_frame < split_frame < updated.end_frame
@@ -262,7 +289,7 @@ def _updated_states(
         ]
         updated.accepted = True
         child.accepted = True
-        return before, [updated, child], inverse_of
+        return before, [_validated_state(updated), _validated_state(child)], inverse_of
     elif action_type == ReviewActionType.MERGE_TRACKS:
         other_id = command.payload.get("other_track_id")
         if not isinstance(other_id, str):
@@ -281,11 +308,11 @@ def _updated_states(
         other.active = False
         other.redacted = False
         other.accepted = True
-        return before, [updated, other], inverse_of
+        return before, [_validated_state(updated), _validated_state(other)], inverse_of
     else:
         raise ReviewError(f"action is not a track edit: {action_type}")
 
-    return before, [updated], inverse_of
+    return before, [_validated_state(updated)], inverse_of
 
 
 def _resolve_inverse(
@@ -345,6 +372,12 @@ def append_review_action(
         raise VideoNotFoundError(video_id)
     if video.review_revision != command.expected_revision:
         raise RevisionConflictError(command.expected_revision, video.review_revision)
+    if video.status not in {
+        VideoStatus.READY_FOR_REVIEW,
+        VideoStatus.EXPORTING,
+        VideoStatus.EXPORTED,
+    }:
+        raise ReviewUnavailableError("review is unavailable while video processing is active")
 
     snapshot = build_review_snapshot(session, video_id)
     inverse_of: str | None

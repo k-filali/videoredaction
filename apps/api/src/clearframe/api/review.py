@@ -20,6 +20,7 @@ from clearframe.services.container import ServiceContainer
 from clearframe.services.reprocessing import ReprocessingError
 from clearframe.services.review import (
     ReviewError,
+    ReviewUnavailableError,
     RevisionConflictError,
     TrackNotFoundError,
     VideoNotFoundError,
@@ -50,6 +51,11 @@ def _raise_review_http_error(error: ReviewError) -> None:
                 "expected_revision": error.expected,
                 "current_revision": error.actual,
             },
+        ) from error
+    if isinstance(error, ReviewUnavailableError):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
         ) from error
     if isinstance(error, (VideoNotFoundError, TrackNotFoundError)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error

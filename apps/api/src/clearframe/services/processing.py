@@ -8,7 +8,8 @@ from time import perf_counter
 from typing import cast
 
 import cv2
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 
 from clearframe.database import Database
 from clearframe.domain.enums import (
@@ -148,6 +149,8 @@ class ProcessingService:
                 raise ProcessingNotFoundError("video not found")
             if not video.proxy_uri or not self.storage.exists(video.proxy_uri):
                 raise ProcessingValidationError("review proxy is not ready")
+            if video.status != VideoStatus.READY_FOR_REVIEW:
+                raise ProcessingConflictError("video is not available for detection")
             if video.review_revision > 0:
                 raise ProcessingConflictError(
                     "full detection cannot be repeated after review has started"
@@ -161,6 +164,25 @@ class ProcessingService:
             )
             if active_job is not None:
                 raise ProcessingConflictError("detection is already running for this video")
+            starting_review_revision = video.review_revision
+            reservation = cast(
+                CursorResult[object],
+                session.execute(
+                    update(VideoAsset)
+                    .where(
+                        VideoAsset.id == video_id,
+                        VideoAsset.review_revision == starting_review_revision,
+                        VideoAsset.status == VideoStatus.READY_FOR_REVIEW,
+                    )
+                    .values(status=VideoStatus.PROCESSING, error_message=None)
+                    .execution_options(synchronize_session="fetch")
+                ),
+            )
+            if reservation.rowcount != 1:
+                session.rollback()
+                raise ProcessingConflictError(
+                    "video processing was claimed by another request"
+                )
 
             run = ModelRun(
                 video_id=video_id,
@@ -193,11 +215,10 @@ class ProcessingService:
                     "model_run_id": run.id,
                     "model_ids": [binding.entry.id for binding in bindings],
                     "sample_every_frames": sample_every_frames,
+                    "starting_review_revision": starting_review_revision,
                 },
             )
             session.add(job)
-            video.status = VideoStatus.PROCESSING
-            video.error_message = None
             session.commit()
 
         self.runner.submit(
@@ -208,6 +229,7 @@ class ProcessingService:
                 run_id=run.id,
                 bindings=bindings,
                 sample_every_frames=sample_every_frames,
+                starting_review_revision=starting_review_revision,
             ),
         )
         return RequestedProcessing(run=run, job=job)
@@ -286,6 +308,7 @@ class ProcessingService:
         run_id: str,
         bindings: tuple[_DetectorBinding, ...],
         sample_every_frames: int,
+        starting_review_revision: int,
     ) -> None:
         try:
             self._process(
@@ -294,6 +317,7 @@ class ProcessingService:
                 run_id=run_id,
                 bindings=bindings,
                 sample_every_frames=sample_every_frames,
+                starting_review_revision=starting_review_revision,
             )
         except Exception as exc:
             with self.database.session() as session:
@@ -313,6 +337,7 @@ class ProcessingService:
         run_id: str,
         bindings: tuple[_DetectorBinding, ...],
         sample_every_frames: int,
+        starting_review_revision: int,
     ) -> None:
         with self.database.session() as session:
             video = session.get(VideoAsset, video_id)
@@ -458,6 +483,13 @@ class ProcessingService:
             stored_video = session.get(VideoAsset, video_id)
             if stored_run is None or stored_video is None:
                 raise ProcessingNotFoundError("processing records disappeared")
+            if (
+                stored_video.review_revision != starting_review_revision
+                or stored_video.status != VideoStatus.PROCESSING
+            ):
+                raise ProcessingConflictError(
+                    "review state changed while detection was running"
+                )
 
             for observation in observations:
                 proposal = observation.proposal

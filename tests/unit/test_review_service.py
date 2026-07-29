@@ -15,6 +15,8 @@ from clearframe.models import (
     VideoAsset,
 )
 from clearframe.services.review import (
+    ReviewError,
+    ReviewUnavailableError,
     RevisionConflictError,
     append_review_action,
     build_review_snapshot,
@@ -208,3 +210,71 @@ def test_review_actions_are_append_only(tmp_path: Path) -> None:
                 {"id": video_id},
             )
         session.rollback()
+
+
+def test_invalid_track_span_is_rejected_before_audit_append(tmp_path: Path) -> None:
+    database = create_database(tmp_path / "invalid-span.db")
+    video_id, track_id = seed_video(database)
+
+    with database.session() as session:
+        with pytest.raises(ReviewError, match="cannot be negative"):
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.TRIM_TRACK,
+                    expected_revision=0,
+                    track_id=track_id,
+                    payload={"start_frame": -1, "start_ms": -100},
+                ),
+                reviewer_session_id="reviewer-a",
+            )
+        assert session.query(ReviewAction).count() == 0
+        assert build_review_snapshot(session, video_id).revision == 0
+
+
+@pytest.mark.parametrize("invalid_frame", [True, 1.5, float("inf"), "2"])
+def test_track_spans_require_strict_integers(
+    tmp_path: Path,
+    invalid_frame: object,
+) -> None:
+    database = create_database(tmp_path / f"strict-{type(invalid_frame).__name__}.db")
+    video_id, track_id = seed_video(database)
+
+    with database.session() as session:
+        with pytest.raises(ReviewError, match="must be an integer"):
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.TRIM_TRACK,
+                    expected_revision=0,
+                    track_id=track_id,
+                    payload={"start_frame": invalid_frame},
+                ),
+                reviewer_session_id="reviewer-a",
+            )
+        assert session.query(ReviewAction).count() == 0
+
+
+def test_review_is_blocked_during_processing(tmp_path: Path) -> None:
+    database = create_database(tmp_path / "processing-review.db")
+    video_id, track_id = seed_video(database)
+    with database.session() as session:
+        video = session.get(VideoAsset, video_id)
+        assert video is not None
+        video.status = VideoStatus.PROCESSING
+        session.commit()
+
+        with pytest.raises(ReviewUnavailableError):
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.ACCEPT_PROPOSAL,
+                    expected_revision=0,
+                    track_id=track_id,
+                ),
+                reviewer_session_id="reviewer-a",
+            )
+        assert session.query(ReviewAction).count() == 0
