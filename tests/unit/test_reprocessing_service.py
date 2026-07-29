@@ -1,6 +1,9 @@
+from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
+from threading import Event
 
+import cv2
 import pytest
 from sqlalchemy import select
 from tests.helpers import generate_test_video
@@ -32,6 +35,9 @@ from clearframe.services.reprocessing import (
     ReprocessingConflictError,
     ReprocessingNotFoundError,
     ReprocessingService,
+    _Candidate,
+    _Seed,
+    _SourcePoint,
 )
 from clearframe.services.review import RevisionConflictError, append_review_action
 from clearframe.storage import LocalStorage
@@ -187,6 +193,39 @@ def _create_suggestion(
         session.add(suggestion)
         session.commit()
         return suggestion.id
+
+
+def _pause_fallback(
+    service: ReprocessingService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Event, Event]:
+    started = Event()
+    resume = Event()
+    propagate = service._propagate_fallback
+
+    def paused(
+        capture: cv2.VideoCapture,
+        *,
+        seed: _Seed,
+        source_points: Sequence[_SourcePoint],
+        start_frame: int,
+        end_frame: int,
+        fps: float,
+    ) -> list[_Candidate]:
+        started.set()
+        if not resume.wait(timeout=30):
+            raise TimeoutError("test did not release reprocessing")
+        return propagate(
+            capture,
+            seed=seed,
+            source_points=source_points,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            fps=fps,
+        )
+
+    monkeypatch.setattr(service, "_propagate_fallback", paused)
+    return started, resume
 
 
 def test_accept_suggestion_appends_locked_truth_without_reprocessing(
@@ -431,6 +470,142 @@ def test_reprocessing_persists_bounded_suggestions_without_mutating_truth(
         with pytest.raises(ReprocessingConflictError, match="already has"):
             service.request(action.id)
     finally:
+        runner.shutdown()
+
+
+def test_reprocessing_discards_suggestions_when_manual_source_is_undone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database, storage, runner, video_id, fps = _build_context(tmp_path)
+    with database.session() as session:
+        action, _ = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.CREATE_MANUAL_REGION,
+                expected_revision=0,
+                frame_index=7,
+                timestamp_ms=round(7 * 1000 / fps),
+                payload={
+                    "class_name": "face",
+                    "start_frame": 4,
+                    "end_frame": 10,
+                    "start_ms": round(4 * 1000 / fps),
+                    "end_ms": round(10 * 1000 / fps),
+                    "bbox": {
+                        "x1": 0.40,
+                        "y1": 0.20,
+                        "x2": 0.55,
+                        "y2": 0.45,
+                    },
+                },
+            ),
+            reviewer_session_id="manual-reviewer",
+        )
+
+    service = ReprocessingService(
+        database,
+        storage,
+        runner,
+        window_seconds=1,
+        prefer_csrt=False,
+    )
+    started, resume = _pause_fallback(service, monkeypatch)
+    try:
+        requested = service.request(action.id)
+        assert started.wait(timeout=30)
+        with database.session() as session:
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.UNDO,
+                    expected_revision=1,
+                    payload={"action_id": action.id},
+                ),
+                reviewer_session_id="manual-reviewer",
+            )
+        resume.set()
+        runner.wait(requested.job.id, timeout=60)
+
+        with database.session() as session:
+            job = session.get(ProcessingJob, requested.job.id)
+            suggestions = list(
+                session.scalars(
+                    select(ReprocessingSuggestion).where(
+                        ReprocessingSuggestion.source_action_id == action.id
+                    )
+                )
+            )
+            assert job is not None
+            assert job.status == JobStatus.COMPLETED
+            assert job.payload["suggestion_count"] == 0
+            assert job.payload["propagation_methods"] == []
+            assert job.payload["discard_reason"] == "source track is no longer current"
+            assert suggestions == []
+    finally:
+        resume.set()
+        runner.shutdown()
+
+
+def test_reprocessing_discards_suggestions_when_seed_geometry_is_superseded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database, storage, runner, video_id, fps = _build_context(tmp_path)
+    action = _create_corrected_action(database, video_id, fps)
+    service = ReprocessingService(
+        database,
+        storage,
+        runner,
+        window_seconds=1,
+        prefer_csrt=False,
+    )
+    started, resume = _pause_fallback(service, monkeypatch)
+    try:
+        requested = service.request(action.id)
+        assert started.wait(timeout=30)
+        with database.session() as session:
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.RESIZE_REGION,
+                    expected_revision=1,
+                    track_id="proposal-track",
+                    frame_index=7,
+                    timestamp_ms=round(7 * 1000 / fps),
+                    payload={
+                        "bbox": {
+                            "x1": 0.34,
+                            "y1": 0.54,
+                            "x2": 0.64,
+                            "y2": 0.71,
+                        }
+                    },
+                ),
+                reviewer_session_id="reviewer-test",
+            )
+        resume.set()
+        runner.wait(requested.job.id, timeout=60)
+
+        with database.session() as session:
+            job = session.get(ProcessingJob, requested.job.id)
+            suggestions = list(
+                session.scalars(
+                    select(ReprocessingSuggestion).where(
+                        ReprocessingSuggestion.source_action_id == action.id
+                    )
+                )
+            )
+            assert job is not None
+            assert job.status == JobStatus.COMPLETED
+            assert job.payload["suggestion_count"] == 0
+            assert job.payload["discard_reason"] == "source seed geometry changed"
+            assert suggestions == []
+    finally:
+        resume.set()
         runner.shutdown()
 
 

@@ -81,6 +81,8 @@ class _Seed:
     bbox: NormalizedBox
     track_start_frame: int
     track_end_frame: int
+    track_start_ms: int
+    track_end_ms: int
     fps: float
 
 
@@ -525,6 +527,8 @@ class ReprocessingService:
             bbox=keyframe.bbox,
             track_start_frame=state.start_frame,
             track_end_frame=state.end_frame,
+            track_start_ms=state.start_ms,
+            track_end_ms=state.end_ms,
             fps=video.fps,
         )
 
@@ -595,10 +599,37 @@ class ReprocessingService:
 
         context.update(0.78, "storing reprocessing suggestions")
         with self.database.session() as session:
+            reservation = cast(
+                CursorResult[object],
+                session.execute(
+                    update(ProcessingJob)
+                    .where(ProcessingJob.id == job_id)
+                    .values(progress=ProcessingJob.progress)
+                    .execution_options(synchronize_session=False)
+                ),
+            )
+            if reservation.rowcount != 1:
+                raise ReprocessingNotFoundError("reprocessing records disappeared")
+            video = session.scalar(
+                select(VideoAsset)
+                .where(VideoAsset.id == seed.video_id)
+                .with_for_update()
+            )
             action = session.get(ReviewAction, source_action_id)
             job = session.get(ProcessingJob, job_id)
-            if action is None or job is None:
+            if video is None or action is None or job is None:
                 raise ReprocessingNotFoundError("reprocessing records disappeared")
+            discard_reason = self._source_discard_reason(session, seed)
+            if discard_reason is not None:
+                job.payload = {
+                    **job.payload,
+                    "suggestion_count": 0,
+                    "propagation_methods": [],
+                    "discard_reason": discard_reason,
+                }
+                session.commit()
+                context.update(0.96, "stale source discarded")
+                return
             session.add_all(
                 ReprocessingSuggestion(
                     video_id=seed.video_id,
@@ -635,6 +666,35 @@ class ReprocessingService:
             }
             session.commit()
         context.update(0.96, "suggestions ready")
+
+    @staticmethod
+    def _source_discard_reason(session: Session, seed: _Seed) -> str | None:
+        snapshot = build_review_snapshot(session, seed.video_id)
+        track = snapshot.tracks.get(seed.track_id)
+        if track is None:
+            return "source track is no longer current"
+        if not track.active:
+            return "source track is no longer active"
+        if track.class_name != seed.class_name:
+            return "source track class changed"
+        if (
+            track.start_frame != seed.track_start_frame
+            or track.end_frame != seed.track_end_frame
+            or track.start_ms != seed.track_start_ms
+            or track.end_ms != seed.track_end_ms
+        ):
+            return "source track span changed"
+        keyframe = next(
+            (
+                item
+                for item in track.keyframes
+                if item.frame_index == seed.frame_index
+            ),
+            None,
+        )
+        if keyframe is None or not keyframe.locked or keyframe.bbox != seed.bbox:
+            return "source seed geometry changed"
+        return None
 
     @staticmethod
     def _source_points(session: Session, track_id: str) -> tuple[_SourcePoint, ...]:
