@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 
+from alembic.script import ScriptDirectory
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
@@ -8,6 +9,19 @@ from clearframe.config import Settings
 from clearframe.database import Database
 from clearframe.main import SCHEMA_HEAD, app, create_app
 from clearframe.services.container import ServiceContainer
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_schema_head_matches_the_latest_migration() -> None:
+    """The readiness pin must track the migration chain.
+
+    Without this, adding a migration leaves every freshly migrated
+    deployment reporting not_ready.
+    """
+    script = ScriptDirectory(str(REPO_ROOT / "migrations"))
+
+    assert script.get_current_head() == SCHEMA_HEAD
 
 
 def test_health_endpoint() -> None:
