@@ -102,7 +102,8 @@ export function ExportModal({
             <p>The output was rendered from frozen revision {artifact.review_revision} and verified.</p>
             {audioPresent && (
               <p className="audio-export-warning">
-                Audio is preserved unchanged and was not reviewed or redacted.
+                Audio content was carried into the export without review or redaction and may be
+                re-encoded.
               </p>
             )}
             <div className="hash-card">
@@ -235,9 +236,9 @@ export function ExportModal({
                   onChange={(event) => setAudioAcknowledged(event.target.checked)}
                 />
                 <span>
-                  <strong>Audio remains unchanged</strong>
+                  <strong>Audio is not redacted</strong>
                   This video-only MVP does not detect or redact spoken names or other
-                  sensitive audio.
+                  sensitive audio. The audio stream may be re-encoded.
                 </span>
               </label>
             )}
