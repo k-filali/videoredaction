@@ -22,7 +22,13 @@ from clearframe.domain.enums import (
 )
 from clearframe.domain.review import ReviewSnapshot
 from clearframe.jobs import JobContext, LocalJobRunner
-from clearframe.media import MediaProcessor, sha256_file
+from clearframe.media import (
+    H264Encoder,
+    MediaError,
+    MediaMetadata,
+    MediaProcessor,
+    sha256_file,
+)
 from clearframe.models import (
     ExportArtifact,
     ModelRun,
@@ -57,10 +63,23 @@ class ExportValidationError(ExportError):
     pass
 
 
+class _EncoderFailure(ExportValidationError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class RequestedExport:
     artifact: ExportArtifact
     job: ProcessingJob
+
+
+@dataclass(frozen=True, slots=True)
+class _RenderedVideo:
+    frame_count: int
+    encoder_name: str
+    hardware_accelerated: bool
+    fallback_used: bool
+    metadata: MediaMetadata
 
 
 class ExportService:
@@ -243,7 +262,7 @@ class ExportService:
         export_uri = self.storage.export_video_uri(video_id, export_id)
         export_path = self.storage.prepare(export_uri)
         context.update(0.05, "rendering reviewed frames")
-        frame_count = self._render_video(
+        rendered_video = self._render_video(
             source=original_path,
             destination=export_path,
             snapshot=snapshot,
@@ -265,7 +284,7 @@ class ExportService:
                 raise ExportNotFoundError(export_id)
             stored_artifact.status = ExportStatus.VERIFYING
             session.commit()
-        output_metadata = self.media.probe(export_path)
+        output_metadata = rendered_video.metadata
         frame_tolerance_ms = max(150, round(2000 / fps))
         if abs(output_metadata.duration_ms - expected_duration_ms) > frame_tolerance_ms:
             raise ExportValidationError("export duration is outside tolerance")
@@ -308,7 +327,10 @@ class ExportService:
             "redaction_style": artifact.redaction_style,
             "action_count": action_count,
             "redaction_track_counts": dict(sorted(track_counts.items())),
-            "frames_rendered": frame_count,
+            "frames_rendered": rendered_video.frame_count,
+            "video_encoder": rendered_video.encoder_name,
+            "hardware_video_encoding": rendered_video.hardware_accelerated,
+            "encoder_fallback_used": rendered_video.fallback_used,
             "duration_ms": output_metadata.duration_ms,
             "width": output_metadata.width,
             "height": output_metadata.height,
@@ -360,6 +382,92 @@ class ExportService:
         height: int,
         estimated_frames: int,
         context: JobContext,
+    ) -> _RenderedVideo:
+        encoders = self.media.export_h264_encoders()
+        for attempt, encoder in enumerate(encoders):
+            temporary = destination.with_name(
+                f"{destination.stem}.{attempt}.{encoder.name}.part{destination.suffix}"
+            )
+            temporary.unlink(missing_ok=True)
+            try:
+                frame_count = self._render_video_attempt(
+                    source=source,
+                    destination=temporary,
+                    snapshot=snapshot,
+                    style=style,
+                    fps=fps,
+                    width=width,
+                    height=height,
+                    estimated_frames=estimated_frames,
+                    context=context,
+                    encoder=encoder,
+                )
+            except _EncoderFailure as exc:
+                temporary.unlink(missing_ok=True)
+                if encoder.hardware_accelerated and attempt + 1 < len(encoders):
+                    context.update(0.08, "hardware encoder failed; retrying on CPU")
+                    continue
+                raise ExportValidationError("video renderer failed") from exc
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
+
+            try:
+                attempt_metadata = self.media.probe(temporary)
+            except MediaError as exc:
+                temporary.unlink(missing_ok=True)
+                if encoder.hardware_accelerated and attempt + 1 < len(encoders):
+                    context.update(0.08, "hardware output invalid; retrying on CPU")
+                    continue
+                raise ExportValidationError("rendered video validation failed") from exc
+            if (
+                attempt_metadata.width != width
+                or attempt_metadata.height != height
+            ):
+                temporary.unlink(missing_ok=True)
+                if encoder.hardware_accelerated and attempt + 1 < len(encoders):
+                    context.update(0.08, "hardware output invalid; retrying on CPU")
+                    continue
+                raise ExportValidationError("rendered video dimensions changed")
+            expected_duration_ms = round(estimated_frames * 1000 / fps)
+            frame_tolerance_ms = max(150, round(2000 / fps))
+            if (
+                abs(attempt_metadata.duration_ms - expected_duration_ms)
+                > frame_tolerance_ms
+            ):
+                temporary.unlink(missing_ok=True)
+                if encoder.hardware_accelerated and attempt + 1 < len(encoders):
+                    context.update(0.08, "hardware output incomplete; retrying on CPU")
+                    continue
+                raise ExportValidationError("rendered video duration is incomplete")
+
+            try:
+                temporary.replace(destination)
+            except OSError as exc:
+                temporary.unlink(missing_ok=True)
+                raise ExportValidationError("rendered video could not be finalized") from exc
+            return _RenderedVideo(
+                frame_count=frame_count,
+                encoder_name=encoder.name,
+                hardware_accelerated=encoder.hardware_accelerated,
+                fallback_used=attempt > 0,
+                metadata=attempt_metadata,
+            )
+        raise ExportValidationError("no H.264 video encoder is available")
+
+    def _render_video_attempt(
+        self,
+        *,
+        source: Path,
+        destination: Path,
+        snapshot: ReviewSnapshot,
+        style: RedactionStyle,
+        fps: float,
+        width: int,
+        height: int,
+        estimated_frames: int,
+        context: JobContext,
+        encoder: H264Encoder,
     ) -> int:
         capture = cv2.VideoCapture(str(source))
         if not capture.isOpened():
@@ -391,12 +499,7 @@ class ExportService:
             "0:v:0",
             "-map",
             "1:a:0?",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "18",
+            *encoder.ffmpeg_arguments,
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -408,16 +511,20 @@ class ExportService:
             "+faststart",
             str(destination),
         ]
-        process: subprocess.Popen[bytes] = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        try:
+            process: subprocess.Popen[bytes] = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except OSError as exc:
+            capture.release()
+            raise _EncoderFailure(f"{encoder.name} could not be started") from exc
         if process.stdin is None:
             capture.release()
             process.kill()
-            raise ExportValidationError("renderer pipe could not be created")
+            raise _EncoderFailure(f"{encoder.name} pipe could not be created")
 
         redaction_lookup = SequentialRedactionLookup(snapshot)
         frame_index = 0
@@ -431,7 +538,11 @@ class ExportService:
                     raise ExportValidationError("decoded frame dimensions changed")
                 redactions = redaction_lookup.at_frame(frame_index)
                 rendered = redact_frame(cast(Frame, frame), redactions, style)
-                self._write_frame(process.stdin, rendered.tobytes())
+                self._write_frame(
+                    process.stdin,
+                    rendered.tobytes(),
+                    encoder_name=encoder.name,
+                )
                 frame_index += 1
                 if frame_index % max(1, estimated_frames // 20) == 0:
                     progress = min(0.87, 0.08 + 0.79 * frame_index / estimated_frames)
@@ -447,7 +558,7 @@ class ExportService:
             try:
                 process.stdin.close()
                 pipe_closed = True
-            except BrokenPipeError:
+            except OSError:
                 pass
 
         try:
@@ -456,21 +567,26 @@ class ExportService:
             process.kill()
             with suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=10)
-            raise ExportValidationError("video renderer timed out") from exc
+            raise _EncoderFailure(f"{encoder.name} timed out") from exc
         if return_code != 0:
-            raise ExportValidationError("video renderer failed")
+            raise _EncoderFailure(f"{encoder.name} failed")
         if not pipe_closed:
-            raise ExportValidationError("video renderer stopped unexpectedly")
+            raise _EncoderFailure(f"{encoder.name} stopped unexpectedly")
         if frame_index == 0:
             raise ExportValidationError("source contained no decodable frames")
         return frame_index
 
     @staticmethod
-    def _write_frame(stream: IO[bytes], frame_bytes: bytes) -> None:
+    def _write_frame(
+        stream: IO[bytes],
+        frame_bytes: bytes,
+        *,
+        encoder_name: str,
+    ) -> None:
         try:
             stream.write(frame_bytes)
-        except BrokenPipeError as exc:
-            raise ExportValidationError("video renderer stopped unexpectedly") from exc
+        except OSError as exc:
+            raise _EncoderFailure(f"{encoder_name} stopped unexpectedly") from exc
 
     @staticmethod
     def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:

@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from clearframe.media import MediaError, MediaMetadata, MediaProcessor
+from clearframe.media import (
+    H264_NVENC,
+    LIBX264_FAST,
+    MediaError,
+    MediaMetadata,
+    MediaProcessor,
+)
 
 
 def metadata(*, codec: str = "h264", width: int = 1280, height: int = 720) -> MediaMetadata:
@@ -54,6 +60,26 @@ class RecordingMediaProcessor(MediaProcessor):
     def probe(self, path: Path) -> MediaMetadata:
         self.probed_paths.append(path)
         return self.source_metadata
+
+
+class EncoderProbeMediaProcessor(MediaProcessor):
+    def __init__(self, *, succeeds: bool) -> None:
+        self.ffmpeg_path = Path("ffmpeg")
+        self.succeeds = succeeds
+        self.commands: list[list[str]] = []
+
+    def _run(
+        self,
+        arguments: list[str],
+        *,
+        timeout: int,
+        failure_message: str,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        self.commands.append(arguments)
+        if not self.succeeds:
+            raise MediaError(failure_message)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
 
 
 def video_codec(arguments: list[str]) -> str:
@@ -134,3 +160,30 @@ def test_direct_generate_proxy_probes_source_for_backward_compatibility(
 
     assert video_codec(processor.commands[0]) == "copy"
     assert processor.probed_paths == [source, destination]
+
+
+@pytest.mark.parametrize("probe_succeeds", [False, True])
+def test_nvenc_requires_a_successful_encode_probe(probe_succeeds: bool) -> None:
+    processor = EncoderProbeMediaProcessor(succeeds=probe_succeeds)
+
+    processor._h264_nvenc_available = processor._detect_h264_nvenc()
+
+    assert processor.h264_nvenc_available is probe_succeeds
+    assert processor.commands
+    assert "-f" in processor.commands[0]
+    assert "lavfi" in processor.commands[0]
+    assert "h264_nvenc" in processor.commands[0]
+    expected = (
+        (H264_NVENC, LIBX264_FAST)
+        if probe_succeeds
+        else (LIBX264_FAST,)
+    )
+    assert processor.export_h264_encoders() == expected
+
+
+def test_cpu_export_encoder_uses_fast_high_quality_settings() -> None:
+    arguments = list(LIBX264_FAST.ffmpeg_arguments)
+
+    assert arguments[arguments.index("-c:v") + 1] == "libx264"
+    assert arguments[arguments.index("-preset") + 1] == "veryfast"
+    assert arguments[arguments.index("-crf") + 1] == "18"

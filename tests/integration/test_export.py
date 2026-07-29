@@ -22,7 +22,7 @@ from clearframe.domain.enums import (
     VideoStatus,
 )
 from clearframe.domain.review import ReviewCommand
-from clearframe.media import sha256_file
+from clearframe.media import LIBX264_FAST, H264Encoder, sha256_file
 from clearframe.models import (
     ExportArtifact,
     ProcessingJob,
@@ -174,6 +174,11 @@ def test_frozen_review_exports_verified_black_box_video(
     assert manifest["redaction_track_counts"] == {"license_plate": 1}
     assert manifest["action_count"] == 1
     assert manifest["frames_rendered"] > 0
+    assert manifest["video_encoder"] in {"h264_nvenc", "libx264"}
+    assert manifest["hardware_video_encoding"] == (
+        manifest["video_encoder"] == "h264_nvenc"
+    )
+    assert isinstance(manifest["encoder_fallback_used"], bool)
     assert manifest["build_id"] == "test-build"
     assert manifest["ffmpeg_version"] == services.media.ffmpeg_version
     assert manifest["model_registry_sha256"] is None
@@ -204,6 +209,120 @@ def test_frozen_review_exports_verified_black_box_video(
     ]
     assert actions[1].after_state["frozen_review_revision"] == 1
     assert actions[2].after_state["export_sha256"] == artifact.export_sha256
+
+
+def test_failed_hardware_encoder_restarts_cleanly_on_cpu(
+    export_environment: tuple[Database, ServiceContainer, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database, services, video_id, track_id, _ = export_environment
+    with database.session() as session:
+        append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.ACCEPT_PROPOSAL,
+                expected_revision=0,
+                track_id=track_id,
+            ),
+            reviewer_session_id="reviewer-export-test",
+        )
+
+    unusable_nvenc = H264Encoder(
+        name="h264_nvenc",
+        ffmpeg_arguments=("-c:v", "clearframe_missing_encoder"),
+        hardware_accelerated=True,
+    )
+    monkeypatch.setattr(
+        services.media,
+        "export_h264_encoders",
+        lambda: (unusable_nvenc, LIBX264_FAST),
+    )
+
+    requested = services.export.request(
+        video_id,
+        expected_revision=1,
+        style=RedactionStyle.BLACK_BOX,
+        reviewer_session_id="reviewer-export-test",
+    )
+    services.runner.wait(requested.job.id, timeout=120)
+
+    with database.session() as session:
+        artifact = session.get(ExportArtifact, requested.artifact.id)
+        job = session.get(ProcessingJob, requested.job.id)
+        assert artifact is not None
+        assert job is not None
+        assert artifact.status == ExportStatus.COMPLETED
+        assert job.status == JobStatus.COMPLETED
+        assert artifact.export_uri is not None
+        assert artifact.manifest_uri is not None
+        export_path = services.storage.path_for(artifact.export_uri)
+        manifest_path = services.storage.path_for(artifact.manifest_uri)
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["video_encoder"] == "libx264"
+    assert manifest["hardware_video_encoding"] is False
+    assert manifest["encoder_fallback_used"] is True
+    assert export_path.is_file()
+    assert list(export_path.parent.glob("*.part.mp4")) == []
+    assert services.media.probe(export_path).audio_present
+
+
+def test_failed_encoder_attempts_leave_no_export_artifact(
+    export_environment: tuple[Database, ServiceContainer, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database, services, video_id, track_id, _ = export_environment
+    with database.session() as session:
+        append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.ACCEPT_PROPOSAL,
+                expected_revision=0,
+                track_id=track_id,
+            ),
+            reviewer_session_id="reviewer-export-test",
+        )
+
+    broken_hardware = H264Encoder(
+        name="h264_nvenc",
+        ffmpeg_arguments=("-c:v", "clearframe_missing_nvenc"),
+        hardware_accelerated=True,
+    )
+    broken_cpu = H264Encoder(
+        name="libx264",
+        ffmpeg_arguments=("-c:v", "clearframe_missing_libx264"),
+        hardware_accelerated=False,
+    )
+    monkeypatch.setattr(
+        services.media,
+        "export_h264_encoders",
+        lambda: (broken_hardware, broken_cpu),
+    )
+
+    requested = services.export.request(
+        video_id,
+        expected_revision=1,
+        style=RedactionStyle.BLACK_BOX,
+        reviewer_session_id="reviewer-export-test",
+    )
+    services.runner.wait(requested.job.id, timeout=120)
+
+    export_uri = services.storage.export_video_uri(video_id, requested.artifact.id)
+    manifest_uri = services.storage.export_manifest_uri(video_id, requested.artifact.id)
+    export_path = services.storage.path_for(export_uri)
+    with database.session() as session:
+        artifact = session.get(ExportArtifact, requested.artifact.id)
+        job = session.get(ProcessingJob, requested.job.id)
+        assert artifact is not None
+        assert job is not None
+        assert artifact.status == ExportStatus.FAILED
+        assert job.status == JobStatus.FAILED
+
+    assert not export_path.exists()
+    assert not services.storage.path_for(manifest_uri).exists()
+    assert list(export_path.parent.glob("*.part.mp4")) == []
 
 
 def test_unresolved_proposal_rejects_export(

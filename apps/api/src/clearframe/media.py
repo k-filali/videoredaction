@@ -39,6 +39,45 @@ class MediaMetadata:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class H264Encoder:
+    name: str
+    ffmpeg_arguments: tuple[str, ...]
+    hardware_accelerated: bool
+
+
+LIBX264_FAST = H264Encoder(
+    name="libx264",
+    ffmpeg_arguments=(
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+    ),
+    hardware_accelerated=False,
+)
+H264_NVENC = H264Encoder(
+    name="h264_nvenc",
+    ffmpeg_arguments=(
+        "-c:v",
+        "h264_nvenc",
+        "-preset",
+        "p4",
+        "-tune",
+        "hq",
+        "-rc",
+        "vbr",
+        "-cq",
+        "19",
+        "-b:v",
+        "0",
+    ),
+    hardware_accelerated=True,
+)
+
+
 def sniff_media(path: Path) -> MediaKind:
     with path.open("rb") as stream:
         header = stream.read(64)
@@ -88,6 +127,7 @@ class MediaProcessor:
             or max_video_fps <= 0
         ):
             raise ValueError("media limits must be positive")
+        self._h264_nvenc_available = self._detect_h264_nvenc()
 
     @staticmethod
     def _resolve_ffmpeg(configured_path: Path | None) -> Path:
@@ -140,6 +180,43 @@ class MediaProcessor:
         if result.returncode != 0:
             raise MediaError(failure_message)
         return result
+
+    def _detect_h264_nvenc(self) -> bool:
+        try:
+            self._run(
+                [
+                    "-hide_banner",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=256x256:r=1:d=0.1",
+                    "-frames:v",
+                    "1",
+                    "-an",
+                    *H264_NVENC.ffmpeg_arguments,
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                timeout=20,
+                failure_message="NVIDIA H.264 encoder probe failed",
+            )
+        except MediaError:
+            return False
+        return True
+
+    @property
+    def h264_nvenc_available(self) -> bool:
+        return self._h264_nvenc_available
+
+    def export_h264_encoders(self) -> tuple[H264Encoder, ...]:
+        if self.h264_nvenc_available:
+            return H264_NVENC, LIBX264_FAST
+        return (LIBX264_FAST,)
 
     def probe(self, path: Path) -> MediaMetadata:
         inspection = self._run(
