@@ -1,7 +1,8 @@
 from pathlib import Path
 
 import pytest
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
+from sqlalchemy.exc import DatabaseError
 
 from clearframe.database import Database
 from clearframe.domain.enums import ReviewActionType, TrackSource, VideoStatus
@@ -180,7 +181,30 @@ def test_review_actions_are_append_only(tmp_path: Path) -> None:
         )
         stored = session.get(ReviewAction, action.id)
         assert stored is not None
+        action_id = action.id
         stored.reason_code = "changed"
         with pytest.raises(ImmutableAuditError, match="append-only"):
             session.commit()
+        session.rollback()
+
+    with database.session() as session:
+        with pytest.raises(DatabaseError, match="append-only"):
+            session.execute(
+                text("UPDATE review_actions SET reason_code = 'bypass' WHERE id = :id"),
+                {"id": action_id},
+            )
+        session.rollback()
+
+        with pytest.raises(DatabaseError, match="append-only"):
+            session.execute(
+                text("DELETE FROM review_actions WHERE id = :id"),
+                {"id": action_id},
+            )
+        session.rollback()
+
+        with pytest.raises(DatabaseError, match="append-only"):
+            session.execute(
+                text("DELETE FROM video_assets WHERE id = :id"),
+                {"id": video_id},
+            )
         session.rollback()

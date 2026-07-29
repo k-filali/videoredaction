@@ -58,10 +58,7 @@ async def upload_video(
     except DuplicateVideoError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": str(exc),
-                "existing_video_id": exc.existing_video_id,
-            },
+            detail=str(exc),
         ) from exc
     except IngestError as exc:
         raise HTTPException(
@@ -135,4 +132,3 @@ def get_thumbnail(
         media_type="image/jpeg",
         headers={"Cache-Control": "private, no-store"},
     )
-

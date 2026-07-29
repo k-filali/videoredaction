@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from fastapi import UploadFile
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from clearframe.database import Database
 from clearframe.domain.enums import JobType, VideoStatus
@@ -131,11 +132,21 @@ class IngestService:
             session.add(video)
             session.flush()
             session.add(job)
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                session.rollback()
+                existing = session.scalar(
+                    select(VideoAsset).where(VideoAsset.original_sha256 == checksum)
+                )
+                self.storage.remove_file(temporary_uri)
+                if existing is not None:
+                    raise DuplicateVideoError(existing.id) from exc
+                raise IngestError("video record could not be created") from exc
 
         self.runner.submit(
             job.id,
-            lambda context: self._finalize(
+            lambda context: self._finalize_with_cleanup(
                 context,
                 video_id=video_id,
                 temporary_uri=temporary_uri,
@@ -144,6 +155,32 @@ class IngestService:
             ),
         )
         return AcceptedUpload(video=video, job=job)
+
+    def _finalize_with_cleanup(
+        self,
+        context: JobContext,
+        *,
+        video_id: str,
+        temporary_uri: str,
+        media_kind: MediaKind,
+        expected_checksum: str,
+    ) -> None:
+        proxy_uri = self.storage.proxy_uri(video_id)
+        thumbnail_uri = self.storage.thumbnail_uri(video_id)
+        try:
+            self._finalize(
+                context,
+                video_id=video_id,
+                temporary_uri=temporary_uri,
+                media_kind=media_kind,
+                expected_checksum=expected_checksum,
+            )
+        except Exception:
+            self.storage.remove_file(proxy_uri)
+            self.storage.remove_file(thumbnail_uri)
+            raise
+        finally:
+            self.storage.remove_file(temporary_uri)
 
     def _finalize(
         self,

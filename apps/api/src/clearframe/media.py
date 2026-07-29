@@ -1,4 +1,5 @@
 import hashlib
+import re
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
@@ -102,52 +103,49 @@ class MediaProcessor:
             raise MediaError(failure_message)
         return result
 
-    def _has_audio(self, path: Path) -> bool:
-        try:
-            self._run(
-                [
-                    "-v",
-                    "error",
-                    "-i",
-                    str(path),
-                    "-map",
-                    "0:a:0",
-                    "-t",
-                    "0.05",
-                    "-f",
-                    "null",
-                    "-",
-                ],
-                timeout=30,
-                failure_message="audio stream not found",
-            )
-        except MediaError:
-            return False
-        return True
-
     def probe(self, path: Path) -> MediaMetadata:
-        try:
-            reader = imageio_ffmpeg.read_frames(
+        inspection = self._run(
+            [
+                "-hide_banner",
+                "-i",
                 str(path),
-                output_params=["-frames:v", "1"],
-            )
-            metadata = next(reader)
-            first_frame = next(reader)
-            reader.close()
-        except (OSError, RuntimeError, StopIteration, ValueError) as exc:
-            raise MediaError("video could not be decoded") from exc
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
+            ],
+            timeout=90,
+            failure_message="video could not be decoded",
+        )
+        probe_output = inspection.stderr
+        duration_match = re.search(
+            r"Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)",
+            probe_output,
+        )
+        video_line = next(
+            (
+                line
+                for line in probe_output.splitlines()
+                if "Stream #" in line and " Video:" in line
+            ),
+            "",
+        )
+        size_match = re.search(r"(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)", video_line)
+        fps_match = re.search(r"(\d+(?:\.\d+)?)\s+fps\b", video_line)
+        codec_match = re.search(r"Video:\s*([^,\s]+)", video_line)
+        if duration_match is None or size_match is None or fps_match is None:
+            raise MediaError("video metadata is invalid")
 
-        source_size = metadata.get("source_size") or metadata.get("size")
-        if (
-            not isinstance(source_size, tuple)
-            or len(source_size) != 2
-            or not all(isinstance(value, int) and value > 0 for value in source_size)
-        ):
+        hours, minutes, seconds = duration_match.groups()
+        duration_seconds = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        width, height = (int(value) for value in size_match.groups())
+        fps = float(fps_match.group(1))
+        if width <= 0 or height <= 0:
             raise MediaError("video dimensions are invalid")
-        width, height = source_size
-        fps = float(metadata.get("fps") or 0.0)
-        duration_seconds = float(metadata.get("duration") or 0.0)
-        if fps <= 0 or duration_seconds <= 0 or not first_frame:
+        if fps <= 0 or duration_seconds <= 0:
             raise MediaError("video duration or frame rate is invalid")
 
         self._run(
@@ -172,10 +170,13 @@ class MediaProcessor:
             fps=fps,
             width=width,
             height=height,
-            codec=str(metadata.get("codec") or "unknown"),
-            audio_present=self._has_audio(path),
+            codec=codec_match.group(1) if codec_match else "unknown",
+            audio_present=any(
+                "Stream #" in line and " Audio:" in line
+                for line in probe_output.splitlines()
+            ),
             frame_count_estimate=max(1, round(duration_seconds * fps)),
-            ffmpeg_version=str(metadata.get("ffmpeg_version") or "unknown"),
+            ffmpeg_version=imageio_ffmpeg.get_ffmpeg_version(),
         )
 
     def generate_proxy(self, source: Path, destination: Path) -> None:

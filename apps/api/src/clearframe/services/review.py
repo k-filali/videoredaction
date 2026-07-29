@@ -1,8 +1,9 @@
 from copy import deepcopy
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from clearframe import __version__
@@ -337,6 +338,28 @@ def append_review_action(
         after_payload = _state_payload(after, sorted(before_ids - after_ids))
 
     next_revision = video.review_revision + 1
+    reservation = cast(
+        CursorResult[Any],
+        session.execute(
+            update(VideoAsset)
+            .where(
+                VideoAsset.id == video_id,
+                VideoAsset.review_revision == command.expected_revision,
+            )
+            .values(review_revision=next_revision)
+            .execution_options(synchronize_session=False)
+        )
+    )
+    if reservation.rowcount != 1:
+        session.rollback()
+        current_revision = session.scalar(
+            select(VideoAsset.review_revision).where(VideoAsset.id == video_id)
+        )
+        raise RevisionConflictError(
+            command.expected_revision,
+            current_revision if current_revision is not None else 0,
+        )
+
     action = ReviewAction(
         video_id=video_id,
         track_id=command.track_id,
@@ -353,7 +376,6 @@ def append_review_action(
         inverse_of_action_id=inverse_of,
     )
     session.add(action)
-    video.review_revision = next_revision
     session.commit()
 
     result = deepcopy(snapshot)

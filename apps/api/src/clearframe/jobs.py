@@ -46,7 +46,9 @@ class LocalJobRunner:
         with self.database.session() as session:
             interrupted = list(
                 session.scalars(
-                    select(ProcessingJob).where(ProcessingJob.status == JobStatus.RUNNING)
+                    select(ProcessingJob).where(
+                        ProcessingJob.status.in_([JobStatus.QUEUED, JobStatus.RUNNING])
+                    )
                 )
             )
             for job in interrupted:
@@ -54,6 +56,16 @@ class LocalJobRunner:
                 job.stage = "interrupted"
                 job.error_message = "Processing was interrupted by an application restart."
                 job.completed_at = utc_now()
+                if job.video_id:
+                    video = session.get(VideoAsset, job.video_id)
+                    if video is not None:
+                        video.status = VideoStatus.FAILED
+                        video.error_message = job.error_message
+                if job.export_id:
+                    export = session.get(ExportArtifact, job.export_id)
+                    if export is not None:
+                        export.status = ExportStatus.FAILED
+                        export.error_message = job.error_message
             session.commit()
 
     def submit(self, job_id: str, handler: JobHandler) -> None:
@@ -122,4 +134,3 @@ class LocalJobRunner:
 
     def shutdown(self) -> None:
         self.executor.shutdown(wait=False, cancel_futures=False)
-

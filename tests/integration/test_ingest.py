@@ -57,6 +57,31 @@ def test_corrupt_container_is_rejected(tmp_path: Path) -> None:
         sniff_media(corrupt)
 
 
+def test_decode_failure_cleans_temporary_artifacts(tmp_path: Path) -> None:
+    database, services = build_services(tmp_path)
+    fake_mp4 = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 256
+
+    async def accept() -> tuple[str, str]:
+        result = await services.ingest.accept(
+            UploadFile(BytesIO(fake_mp4), filename="crafted.mp4")
+        )
+        return result.video.id, result.job.id
+
+    video_id, job_id = asyncio.run(accept())
+    services.runner.wait(job_id, timeout=30)
+
+    with database.session() as session:
+        video = session.get(VideoAsset, video_id)
+        job = session.get(ProcessingJob, job_id)
+        assert video is not None
+        assert job is not None
+        assert video.status == VideoStatus.FAILED
+        assert job.status == JobStatus.FAILED
+    assert not list(services.storage.root.rglob("*.upload"))
+    assert not list(services.storage.root.rglob("proxy.mp4"))
+    services.runner.shutdown()
+
+
 def test_ingest_preserves_original_and_rejects_duplicates(tmp_path: Path) -> None:
     database, services = build_services(tmp_path)
     source = generate_test_video(tmp_path / "upload.mp4", services.media)
@@ -165,3 +190,30 @@ def test_upload_limit_removes_temporary_file(tmp_path: Path) -> None:
     asyncio.run(upload_large_file())
     assert not list(storage.root.glob("tmp/uploads/*"))
     services.runner.shutdown()
+
+
+def test_request_limit_rejects_before_upload_parsing(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{(tmp_path / 'request-limit.db').as_posix()}")
+    settings = Settings(
+        database_url=str(database.engine.url),
+        storage_root=tmp_path / "request-limit-storage",
+        max_upload_mb=1,
+        env="test",
+    )
+    services = ServiceContainer.build(settings, database)
+    app = create_app(settings=settings, database=database, services=services)
+
+    async def upload() -> None:
+        async with app.router.lifespan_context(app):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    "/api/videos",
+                    files={"file": ("oversized.mp4", b"x" * (4 * 1024 * 1024), "video/mp4")},
+                )
+                assert response.status_code == 413
+
+    asyncio.run(upload())
+    assert not list(settings.storage_root.rglob("*.upload"))
+    with database.session() as session:
+        assert session.query(VideoAsset).count() == 0

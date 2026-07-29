@@ -45,6 +45,8 @@ class LocalStorage:
         return self.path_for(uri).is_file()
 
     def remove_file(self, uri: str) -> None:
+        if PurePosixPath(uri).parts[:1] == ("originals",):
+            raise StorageSecurityError("immutable originals cannot be removed")
         path = self.path_for(uri)
         if path.is_file():
             if not os.access(path, os.W_OK):
@@ -83,4 +85,3 @@ class LocalStorage:
     @staticmethod
     def thumbnail_uri(video_id: str) -> str:
         return f"thumbnails/{video_id}/poster.jpg"
-

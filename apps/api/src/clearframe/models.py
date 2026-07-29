@@ -15,6 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
 )
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from clearframe.database import Base
@@ -269,6 +270,34 @@ class ProcessingJob(Base):
 
 class ImmutableAuditError(RuntimeError):
     pass
+
+
+@event.listens_for(ReviewAction.__table__, "after_create")
+def install_sqlite_audit_guards(
+    _: Any,
+    connection: Connection,
+    **__: Any,
+) -> None:
+    if connection.dialect.name != "sqlite":
+        return
+    connection.exec_driver_sql(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_review_action_update
+        BEFORE UPDATE ON review_actions
+        BEGIN
+            SELECT RAISE(ABORT, 'review actions are append-only');
+        END
+        """
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_review_action_delete
+        BEFORE DELETE ON review_actions
+        BEGIN
+            SELECT RAISE(ABORT, 'review actions are append-only');
+        END
+        """
+    )
 
 
 @event.listens_for(Session, "before_flush")
