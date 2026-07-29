@@ -14,6 +14,7 @@ COPY requirements.lock pyproject.toml alembic.ini ./
 RUN python -m pip install --no-cache-dir -r requirements.lock
 
 COPY apps/api ./apps/api
+COPY configs ./configs
 COPY migrations ./migrations
 RUN python -m pip install --no-cache-dir --no-deps .
 

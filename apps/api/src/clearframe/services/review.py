@@ -2,7 +2,7 @@ from copy import deepcopy
 from typing import Any, cast
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -65,14 +65,22 @@ def build_review_snapshot(
     if video is None:
         raise VideoNotFoundError(video_id)
 
+    active_track_scope = or_(
+        Track.model_run_id.is_(None),
+        Track.model_run_id == video.active_model_run_id,
+    )
     tracks = list(
-        session.scalars(select(Track).where(Track.video_id == video_id).order_by(Track.start_ms))
+        session.scalars(
+            select(Track)
+            .where(Track.video_id == video_id, active_track_scope)
+            .order_by(Track.start_ms)
+        )
     )
     keyframes = list(
         session.scalars(
             select(TrackKeyframe)
             .join(Track, Track.id == TrackKeyframe.track_id)
-            .where(Track.video_id == video_id)
+            .where(Track.video_id == video_id, active_track_scope)
             .order_by(TrackKeyframe.frame_index)
         )
     )

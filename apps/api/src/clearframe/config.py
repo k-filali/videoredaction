@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     max_upload_mb: int = Field(default=2048, gt=0)
     ffmpeg_path: Path | None = None
     ffprobe_path: Path | None = None
+    model_registry_path: Path = Path("configs/models/registry.yaml")
     detector: str = "mock"
     enable_face_detector: bool = False
     enable_text_detector: bool = False

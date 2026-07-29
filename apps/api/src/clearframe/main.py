@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from clearframe import __version__
 from clearframe.api.exports import router as exports_router
+from clearframe.api.processing import router as processing_router
 from clearframe.api.review import router as review_router
 from clearframe.api.videos import router as videos_router
 from clearframe.config import Settings, get_settings
@@ -15,6 +16,7 @@ from clearframe.database import Database
 from clearframe.middleware import AccessTokenMiddleware, UploadLimitMiddleware
 from clearframe.observability import RequestTraceMiddleware, configure_observability
 from clearframe.services.container import ServiceContainer
+from clearframe.services.processing import ProcessingService
 
 
 @asynccontextmanager
@@ -51,6 +53,12 @@ def create_app(
     app.state.settings = resolved_settings
     app.state.database = resolved_database
     app.state.services = resolved_services
+    app.state.processing_service = ProcessingService(
+        resolved_database,
+        resolved_services.storage,
+        resolved_services.runner,
+        registry_path=resolved_settings.model_registry_path,
+    )
     app.add_middleware(
         UploadLimitMiddleware,
         max_upload_bytes=resolved_settings.max_upload_mb * 1024 * 1024,
@@ -74,6 +82,7 @@ def create_app(
     app.include_router(videos_router)
     app.include_router(review_router)
     app.include_router(exports_router)
+    app.include_router(processing_router)
 
     @app.get("/api/health", tags=["system"])
     async def health() -> dict[str, str]:
