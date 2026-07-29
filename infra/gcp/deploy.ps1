@@ -548,7 +548,6 @@ function Set-ReconcileSchedule {
         '--http-method=POST',
         "--oauth-service-account-email=$SchedulerAccount",
         '--oauth-token-scope=https://www.googleapis.com/auth/cloud-platform',
-        '--headers=Content-Type=application/json',
         '--message-body={}',
         '--attempt-deadline=60s',
         '--max-retry-attempts=3',
@@ -563,10 +562,18 @@ function Set-ReconcileSchedule {
         "--project=$script:ProjectId",
         '--quiet'
     )) {
-        Invoke-Gcloud (@('scheduler', 'jobs', 'update', 'http', $Names.SchedulerJob) + $common)
+        Invoke-Gcloud (
+            @('scheduler', 'jobs', 'update', 'http', $Names.SchedulerJob) +
+            $common +
+            @('--update-headers=Content-Type=application/json')
+        )
     }
     else {
-        Invoke-Gcloud (@('scheduler', 'jobs', 'create', 'http', $Names.SchedulerJob) + $common)
+        Invoke-Gcloud (
+            @('scheduler', 'jobs', 'create', 'http', $Names.SchedulerJob) +
+            $common +
+            @('--headers=Content-Type=application/json')
+        )
     }
 }
 
