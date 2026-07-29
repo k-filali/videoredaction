@@ -2,6 +2,7 @@ import hashlib
 import re
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
 from fastapi import UploadFile
 from sqlalchemy import select
@@ -9,8 +10,16 @@ from sqlalchemy.exc import IntegrityError
 
 from clearframe.database import Database
 from clearframe.domain.enums import JobType, VideoStatus
+from clearframe.gcs_storage import GCSObjectMetadata
 from clearframe.jobs import JobContext, JobDispatcher
-from clearframe.media import MediaError, MediaKind, MediaProcessor, sha256_file, sniff_media
+from clearframe.media import (
+    MediaError,
+    MediaKind,
+    MediaProcessor,
+    UnsupportedMediaError,
+    sha256_file,
+    sniff_media,
+)
 from clearframe.models import ProcessingJob, VideoAsset, new_id
 from clearframe.storage import (
     ArtifactStorage,
@@ -34,6 +43,10 @@ class EmptyUploadError(IngestError):
     pass
 
 
+class DirectUploadStateError(IngestError):
+    pass
+
+
 class DuplicateVideoError(IngestError):
     def __init__(self, existing_video_id: str) -> None:
         super().__init__("this video has already been uploaded")
@@ -44,6 +57,22 @@ class DuplicateVideoError(IngestError):
 class AcceptedUpload:
     video: VideoAsset
     job: ProcessingJob
+
+
+@dataclass(frozen=True, slots=True)
+class DirectUploadDetails:
+    size_bytes: int
+    content_type: str
+    generation: int
+
+
+def validate_case_hash(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", normalized):
+        raise IngestError("hashed_case_id must be a SHA-256 hex digest")
+    return normalized
 
 
 class IngestService:
@@ -61,21 +90,12 @@ class IngestService:
         self.runner = runner
         self.max_upload_bytes = max_upload_mb * 1024 * 1024
 
-    @staticmethod
-    def _validate_case_hash(value: str | None) -> str | None:
-        if value is None or not value.strip():
-            return None
-        normalized = value.strip().lower()
-        if not re.fullmatch(r"[a-f0-9]{64}", normalized):
-            raise IngestError("hashed_case_id must be a SHA-256 hex digest")
-        return normalized
-
     async def accept(
         self,
         upload: UploadFile,
         hashed_case_id: str | None = None,
     ) -> AcceptedUpload:
-        validated_case_hash = self._validate_case_hash(hashed_case_id)
+        validated_case_hash = validate_case_hash(hashed_case_id)
         display_name = sanitize_filename(upload.filename)
         video_id = new_id()
         temporary_uri = temporary_upload_key(video_id)
@@ -154,6 +174,83 @@ class IngestService:
         self.runner.enqueue(job.id)
         return AcceptedUpload(video=video, job=job)
 
+    def enqueue_direct_upload(
+        self,
+        video_id: str,
+        *,
+        metadata: GCSObjectMetadata,
+    ) -> AcceptedUpload:
+        created = False
+        with self.database.session() as session:
+            video = session.scalar(
+                select(VideoAsset)
+                .where(VideoAsset.id == video_id)
+                .with_for_update()
+            )
+            if video is None:
+                raise DirectUploadStateError("upload was not found")
+            if video.metadata_json.get("upload_transport") != "gcs_resumable":
+                raise DirectUploadStateError("video is not a resumable upload")
+
+            job = session.scalar(
+                select(ProcessingJob)
+                .where(
+                    ProcessingJob.video_id == video_id,
+                    ProcessingJob.job_type == JobType.INGEST,
+                )
+                .order_by(ProcessingJob.created_at.asc())
+            )
+            if job is None:
+                if video.status != VideoStatus.UPLOADING:
+                    raise DirectUploadStateError("upload cannot be completed")
+                declared_size = video.metadata_json.get("declared_upload_bytes")
+                declared_content_type = video.metadata_json.get(
+                    "declared_content_type"
+                )
+                if (
+                    declared_size != metadata.size
+                    or declared_content_type != metadata.content_type
+                ):
+                    raise DirectUploadStateError(
+                        "uploaded object does not match its declaration"
+                    )
+
+                video.status = VideoStatus.VALIDATING
+                video.metadata_json = {
+                    **video.metadata_json,
+                    "upload_generation": metadata.generation,
+                    "upload_crc32c": metadata.crc32c,
+                    "upload_etag": metadata.etag,
+                }
+                job = ProcessingJob(
+                    id=new_id(),
+                    video_id=video_id,
+                    job_type=JobType.INGEST,
+                    stage="queued",
+                    payload={
+                        "temporary_uri": metadata.key,
+                        "direct_upload": {
+                            "size_bytes": metadata.size,
+                            "content_type": metadata.content_type,
+                            "generation": metadata.generation,
+                        },
+                    },
+                )
+                session.add(job)
+                created = True
+                session.commit()
+            else:
+                stored_generation = video.metadata_json.get("upload_generation")
+                if stored_generation != metadata.generation:
+                    raise DirectUploadStateError("upload generation changed")
+
+            session.expunge(video)
+            session.expunge(job)
+
+        if created:
+            self.runner.enqueue(job.id)
+        return AcceptedUpload(video=video, job=job)
+
     def execute(self, context: JobContext, job_id: str) -> None:
         with self.database.session() as session:
             job = session.get(ProcessingJob, job_id)
@@ -162,7 +259,38 @@ class IngestService:
             temporary_uri = job.payload.get("temporary_uri")
             expected_checksum = job.payload.get("expected_checksum")
             media_payload = job.payload.get("media_kind")
+            direct_payload = job.payload.get("direct_upload")
             video_id = job.video_id
+
+        if direct_payload is not None:
+            if not isinstance(temporary_uri, str) or not isinstance(
+                direct_payload, dict
+            ):
+                raise IngestError("direct ingest job payload is invalid")
+            size_bytes = direct_payload.get("size_bytes")
+            content_type = direct_payload.get("content_type")
+            generation = direct_payload.get("generation")
+            if (
+                not isinstance(size_bytes, int)
+                or isinstance(size_bytes, bool)
+                or size_bytes <= 0
+                or not isinstance(content_type, str)
+                or not isinstance(generation, int)
+                or isinstance(generation, bool)
+                or generation <= 0
+            ):
+                raise IngestError("direct ingest metadata is invalid")
+            self._finalize_with_cleanup(
+                context,
+                video_id=video_id,
+                temporary_uri=temporary_uri,
+                direct_upload=DirectUploadDetails(
+                    size_bytes=size_bytes,
+                    content_type=content_type,
+                    generation=generation,
+                ),
+            )
+            return
 
         if (
             not isinstance(temporary_uri, str)
@@ -198,19 +326,30 @@ class IngestService:
         *,
         video_id: str,
         temporary_uri: str,
-        media_kind: MediaKind,
-        expected_checksum: str,
+        media_kind: MediaKind | None = None,
+        expected_checksum: str | None = None,
+        direct_upload: DirectUploadDetails | None = None,
     ) -> None:
         proxy_uri = proxy_key(video_id)
         thumbnail_uri = thumbnail_key(video_id)
         try:
-            self._finalize(
-                context,
-                video_id=video_id,
-                temporary_uri=temporary_uri,
-                media_kind=media_kind,
-                expected_checksum=expected_checksum,
-            )
+            with self.storage.materialize_input(temporary_uri) as temporary_path:
+                if direct_upload is not None:
+                    media_kind, expected_checksum = self._prepare_direct_upload(
+                        context,
+                        video_id=video_id,
+                        temporary_path=temporary_path,
+                        details=direct_upload,
+                    )
+                if media_kind is None or expected_checksum is None:
+                    raise IngestError("ingest media validation is incomplete")
+                self._finalize(
+                    context,
+                    video_id=video_id,
+                    temporary_path=temporary_path,
+                    media_kind=media_kind,
+                    expected_checksum=expected_checksum,
+                )
         except Exception:
             self.storage.remove_file(proxy_uri)
             self.storage.remove_file(thumbnail_uri)
@@ -223,59 +362,58 @@ class IngestService:
         context: JobContext,
         *,
         video_id: str,
-        temporary_uri: str,
+        temporary_path: Path,
         media_kind: MediaKind,
         expected_checksum: str,
     ) -> None:
-        with self.storage.materialize_input(temporary_uri) as temporary_path:
-            context.update(0.08, "validating media")
-            metadata = self.media.probe(temporary_path)
+        context.update(0.08, "validating media")
+        metadata = self.media.probe(temporary_path)
 
-            original_uri = original_key(video_id, media_kind.extension)
-            with self.storage.publish_output(original_uri) as original_path:
-                shutil.copyfile(temporary_path, original_path)
-                if sha256_file(original_path) != expected_checksum:
-                    raise MediaError("original checksum changed during ingest")
+        original_uri = original_key(video_id, media_kind.extension)
+        with self.storage.publish_output(original_uri) as original_path:
+            shutil.copyfile(temporary_path, original_path)
+            if sha256_file(original_path) != expected_checksum:
+                raise MediaError("original checksum changed during ingest")
 
-            with self.database.session() as session:
-                video = session.get(VideoAsset, video_id)
-                if video is None:
-                    raise IngestError("video record disappeared during ingest")
-                video.duration_ms = metadata.duration_ms
-                video.fps = metadata.fps
-                video.width = metadata.width
-                video.height = metadata.height
-                video.codec = metadata.codec
-                video.audio_present = metadata.audio_present
-                video.original_uri = original_uri
-                video.status = VideoStatus.PROXYING
-                video.metadata_json = {
-                    **video.metadata_json,
-                    "frame_count_estimate": metadata.frame_count_estimate,
-                    "ffmpeg_version": metadata.ffmpeg_version,
-                }
-                session.commit()
+        with self.database.session() as session:
+            video = session.get(VideoAsset, video_id)
+            if video is None:
+                raise IngestError("video record disappeared during ingest")
+            video.duration_ms = metadata.duration_ms
+            video.fps = metadata.fps
+            video.width = metadata.width
+            video.height = metadata.height
+            video.codec = metadata.codec
+            video.audio_present = metadata.audio_present
+            video.original_uri = original_uri
+            video.status = VideoStatus.PROXYING
+            video.metadata_json = {
+                **video.metadata_json,
+                "frame_count_estimate": metadata.frame_count_estimate,
+                "ffmpeg_version": metadata.ffmpeg_version,
+            }
+            session.commit()
 
-            context.update(0.35, "generating review proxy")
-            proxy_uri = proxy_key(video_id)
-            with self.storage.publish_output(proxy_uri) as proxy_path:
-                self.media.generate_proxy(
+        context.update(0.35, "generating review proxy")
+        proxy_uri = proxy_key(video_id)
+        with self.storage.publish_output(proxy_uri) as proxy_path:
+            self.media.generate_proxy(
+                temporary_path,
+                proxy_path,
+                metadata=metadata,
+            )
+
+        context.update(0.88, "generating thumbnail")
+        thumbnail_uri = thumbnail_key(video_id)
+        try:
+            with self.storage.publish_output(thumbnail_uri) as thumbnail_path:
+                self.media.generate_thumbnail(
                     temporary_path,
-                    proxy_path,
-                    metadata=metadata,
+                    thumbnail_path,
+                    metadata.duration_ms,
                 )
-
-            context.update(0.88, "generating thumbnail")
-            thumbnail_uri = thumbnail_key(video_id)
-            try:
-                with self.storage.publish_output(thumbnail_uri) as thumbnail_path:
-                    self.media.generate_thumbnail(
-                        temporary_path,
-                        thumbnail_path,
-                        metadata.duration_ms,
-                    )
-            except MediaError:
-                thumbnail_uri = ""
+        except MediaError:
+            thumbnail_uri = ""
 
         with self.database.session() as session:
             video = session.get(VideoAsset, video_id)
@@ -287,3 +425,66 @@ class IngestService:
             video.error_message = None
             session.commit()
         context.update(0.98, "finalizing")
+
+    def _prepare_direct_upload(
+        self,
+        context: JobContext,
+        *,
+        video_id: str,
+        temporary_path: Path,
+        details: DirectUploadDetails,
+    ) -> tuple[MediaKind, str]:
+        context.update(0.03, "verifying upload")
+        actual_size = temporary_path.stat().st_size
+        if actual_size == 0:
+            raise EmptyUploadError("video is empty")
+        if actual_size != details.size_bytes:
+            raise IngestError("materialized upload size changed")
+        media_kind = sniff_media(temporary_path)
+        if (
+            details.content_type != "application/octet-stream"
+            and media_kind.content_type != details.content_type
+        ):
+            raise UnsupportedMediaError(
+                "declared content type does not match uploaded media"
+            )
+        checksum = sha256_file(temporary_path)
+
+        with self.database.session() as session:
+            video = session.get(VideoAsset, video_id)
+            if video is None:
+                raise IngestError("video record disappeared during ingest")
+            if video.metadata_json.get("upload_generation") != details.generation:
+                raise IngestError("upload generation changed before ingest")
+            duplicate = session.scalar(
+                select(VideoAsset).where(
+                    VideoAsset.original_sha256 == checksum,
+                    VideoAsset.id != video_id,
+                )
+            )
+            if duplicate is not None:
+                raise DuplicateVideoError(duplicate.id)
+
+            video.original_sha256 = checksum
+            video.content_type = media_kind.content_type
+            video.status = VideoStatus.VALIDATING
+            video.metadata_json = {
+                **video.metadata_json,
+                "container": media_kind.container,
+                "upload_bytes": actual_size,
+            }
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                session.rollback()
+                existing = session.scalar(
+                    select(VideoAsset).where(
+                        VideoAsset.original_sha256 == checksum,
+                        VideoAsset.id != video_id,
+                    )
+                )
+                if existing is not None:
+                    raise DuplicateVideoError(existing.id) from exc
+                raise IngestError("video checksum could not be recorded") from exc
+
+        return media_kind, checksum

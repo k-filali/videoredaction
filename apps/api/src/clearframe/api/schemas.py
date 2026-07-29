@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from clearframe.domain.enums import (
     ExportStatus,
@@ -101,6 +101,35 @@ class JobRead(BaseModel):
 class UploadAccepted(BaseModel):
     video: VideoRead
     job: JobRead
+
+
+class MultipartUploadCapability(BaseModel):
+    mode: Literal["multipart"] = "multipart"
+
+
+class ResumableUploadCapability(BaseModel):
+    mode: Literal["resumable"] = "resumable"
+    chunk_size_bytes: int = Field(gt=0)
+    max_upload_bytes: int = Field(gt=0)
+
+
+class UploadInitiate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(min_length=1, max_length=128)
+    size_bytes: int = Field(gt=0)
+    hashed_case_id: str | None = None
+
+
+class UploadSessionRead(BaseModel):
+    upload_id: str
+    session_url: str
+    chunk_size_bytes: int = Field(gt=0)
+
+
+class UploadComplete(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class VideoStatusRead(BaseModel):

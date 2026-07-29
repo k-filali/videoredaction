@@ -13,6 +13,7 @@ from clearframe.services.ingest import IngestService
 from clearframe.services.processing import ProcessingService
 from clearframe.services.proxy import ProxyService
 from clearframe.services.reprocessing import ReprocessingService
+from clearframe.services.uploads import UploadService
 from clearframe.storage import ArtifactStorage, LocalStorage
 
 
@@ -24,6 +25,7 @@ class ServiceContainer:
     executor: JobExecutor
     runner: ManagedJobDispatcher
     ingest: IngestService
+    uploads: UploadService
     proxy: ProxyService
     processing: ProcessingService
     export: ExportService
@@ -74,6 +76,13 @@ class ServiceContainer:
             runner=runner,
             max_upload_mb=settings.max_upload_mb,
         )
+        uploads = UploadService(
+            database=database,
+            storage=storage,
+            ingest=ingest,
+            max_upload_mb=settings.max_upload_mb,
+            web_origin=settings.web_origin,
+        )
         proxy = ProxyService(
             database=database,
             storage=storage,
@@ -111,6 +120,7 @@ class ServiceContainer:
             executor=executor,
             runner=runner,
             ingest=ingest,
+            uploads=uploads,
             proxy=proxy,
             processing=processing,
             export=export,

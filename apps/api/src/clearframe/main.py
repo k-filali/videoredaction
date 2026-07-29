@@ -13,6 +13,7 @@ from clearframe import __version__
 from clearframe.api.exports import router as exports_router
 from clearframe.api.processing import router as processing_router
 from clearframe.api.review import router as review_router
+from clearframe.api.uploads import router as uploads_router
 from clearframe.api.videos import router as videos_router
 from clearframe.config import Settings, get_settings
 from clearframe.database import Database
@@ -90,6 +91,7 @@ def create_app(
         allow_headers=["*"],
     )
     app.add_middleware(RequestTraceMiddleware)
+    app.include_router(uploads_router)
     app.include_router(videos_router)
     app.include_router(review_router)
     app.include_router(exports_router)
