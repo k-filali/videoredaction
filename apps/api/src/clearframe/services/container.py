@@ -43,6 +43,7 @@ class ServiceContainer:
             storage=storage,
             media=media,
             runner=runner,
+            build_id=settings.build_id,
         )
         reprocess = ReprocessingService(
             database=database,

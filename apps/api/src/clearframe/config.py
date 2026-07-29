@@ -25,13 +25,10 @@ class Settings(BaseSettings):
     max_video_dimension: int = Field(default=8192, ge=640)
     max_video_fps: float = Field(default=120.0, ge=1.0, le=240.0)
     ffmpeg_path: Path | None = None
-    ffprobe_path: Path | None = None
     model_registry_path: Path = Path("configs/models/registry.yaml")
-    detector: str = "mock"
-    enable_face_detector: bool = False
-    enable_text_detector: bool = False
     reprocess_window_seconds: int = Field(default=3, ge=1, le=30)
     log_level: str = "INFO"
+    build_id: str = Field(default="development", min_length=1, max_length=128)
 
     @field_validator("access_token", mode="before")
     @classmethod

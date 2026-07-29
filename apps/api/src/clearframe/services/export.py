@@ -1,6 +1,7 @@
 import json
 import subprocess
 from collections import Counter
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,7 +22,14 @@ from clearframe.domain.enums import (
 from clearframe.domain.review import ReviewSnapshot
 from clearframe.jobs import JobContext, LocalJobRunner
 from clearframe.media import MediaProcessor, sha256_file
-from clearframe.models import ExportArtifact, ProcessingJob, ReviewAction, VideoAsset, new_id
+from clearframe.models import (
+    ExportArtifact,
+    ModelRun,
+    ProcessingJob,
+    ReviewAction,
+    VideoAsset,
+    new_id,
+)
 from clearframe.rendering import Frame, redact_frame, redactions_at_frame
 from clearframe.services.review import (
     RevisionConflictError,
@@ -60,11 +68,13 @@ class ExportService:
         storage: LocalStorage,
         media: MediaProcessor,
         runner: LocalJobRunner,
+        build_id: str,
     ) -> None:
         self.database = database
         self.storage = storage
         self.media = media
         self.runner = runner
+        self.build_id = build_id
 
     @staticmethod
     def _validate_snapshot(snapshot: ReviewSnapshot) -> None:
@@ -199,7 +209,13 @@ class ExportService:
             expected_width = video.width or 0
             expected_height = video.height or 0
             fps = video.fps or 0.0
-            model_run_id = video.active_model_run_id
+            model_run_id = artifact.source_model_run_id
+            model_run = (
+                session.get(ModelRun, model_run_id)
+                if model_run_id is not None
+                else None
+            )
+            model_registry_sha256 = model_run.config_hash if model_run is not None else None
             video_id = video.id
             original_filename = video.original_filename
 
@@ -261,6 +277,8 @@ class ExportService:
                 if track.warning is not None
             }
         )
+        if output_metadata.audio_present:
+            warnings.append("Audio was preserved without redaction.")
         manifest = {
             "schema_version": 1,
             "export_id": export_id,
@@ -269,7 +287,10 @@ class ExportService:
             "original_sha256": expected_original_hash,
             "export_sha256": export_hash,
             "application_version": __version__,
+            "build_id": self.build_id,
+            "ffmpeg_version": self.media.ffmpeg_version,
             "model_run_id": model_run_id,
+            "model_registry_sha256": model_registry_sha256,
             "review_revision": artifact.review_revision,
             "redaction_style": artifact.redaction_style,
             "action_count": action_count,
@@ -280,6 +301,8 @@ class ExportService:
             "height": output_metadata.height,
             "fps": output_metadata.fps,
             "audio_present": output_metadata.audio_present,
+            "audio_redaction_applied": False,
+            "audio_policy": "preserved_unreviewed",
             "warnings": warnings,
             "created_at": utc_now().isoformat(),
         }
@@ -375,7 +398,7 @@ class ExportService:
         process: subprocess.Popen[bytes] = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if process.stdin is None:
@@ -400,8 +423,10 @@ class ExportService:
                     progress = min(0.87, 0.08 + 0.79 * frame_index / estimated_frames)
                     context.update(progress, "rendering reviewed frames")
         except Exception:
-            process.kill()
-            process.wait(timeout=10)
+            if process.poll() is None:
+                process.kill()
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=10)
             raise
         finally:
             capture.release()
@@ -411,11 +436,16 @@ class ExportService:
             except BrokenPipeError:
                 pass
 
-        error_output = process.stderr.read() if process.stderr is not None else b""
-        return_code = process.wait(timeout=120)
+        try:
+            return_code = process.wait(timeout=120)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=10)
+            raise ExportValidationError("video renderer timed out") from exc
         if return_code != 0:
             raise ExportValidationError("video renderer failed")
-        if not pipe_closed and error_output:
+        if not pipe_closed:
             raise ExportValidationError("video renderer stopped unexpectedly")
         if frame_index == 0:
             raise ExportValidationError("source contained no decodable frames")

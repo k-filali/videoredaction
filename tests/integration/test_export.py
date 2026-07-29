@@ -45,6 +45,7 @@ def export_environment(
         storage_root=tmp_path / "storage",
         max_upload_mb=10,
         env="test",
+        build_id="test-build",
     )
     services = ServiceContainer.build(settings, database)
     upload_path = generate_test_video(tmp_path / "upload.mp4", services.media)
@@ -170,6 +171,13 @@ def test_frozen_review_exports_verified_black_box_video(
     assert manifest["redaction_track_counts"] == {"license_plate": 1}
     assert manifest["action_count"] == 1
     assert manifest["frames_rendered"] > 0
+    assert manifest["build_id"] == "test-build"
+    assert manifest["ffmpeg_version"] == services.media.ffmpeg_version
+    assert manifest["model_registry_sha256"] is None
+    assert manifest["audio_present"] is True
+    assert manifest["audio_redaction_applied"] is False
+    assert manifest["audio_policy"] == "preserved_unreviewed"
+    assert "Audio was preserved without redaction." in manifest["warnings"]
 
     metadata = services.media.probe(export_path)
     assert metadata.width == 640

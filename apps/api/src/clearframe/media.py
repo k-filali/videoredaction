@@ -76,6 +76,7 @@ class MediaProcessor:
         max_video_fps: float = 120.0,
     ) -> None:
         self.ffmpeg_path = self._resolve_ffmpeg(ffmpeg_path)
+        self.ffmpeg_version = self._detect_version()
         self.max_duration_ms = max_duration_ms
         self.max_video_pixels = max_video_pixels
         self.max_video_dimension = max_video_dimension
@@ -99,6 +100,18 @@ class MediaProcessor:
         if system_path:
             return Path(system_path).resolve()
         return Path(imageio_ffmpeg.get_ffmpeg_exe()).resolve()
+
+    def _detect_version(self) -> str:
+        result = self._run(
+            ["-version"],
+            timeout=10,
+            failure_message="FFmpeg version could not be read",
+        )
+        output = result.stdout or result.stderr
+        first_line = output.splitlines()[0].strip() if output.splitlines() else ""
+        if not first_line:
+            raise MediaError("FFmpeg version could not be read")
+        return first_line[:256]
 
     def _run(
         self,
@@ -214,7 +227,7 @@ class MediaProcessor:
                 for line in probe_output.splitlines()
             ),
             frame_count_estimate=max(1, round(duration_seconds * fps)),
-            ffmpeg_version=imageio_ffmpeg.get_ffmpeg_version(),
+            ffmpeg_version=self.ffmpeg_version,
         )
 
     def generate_proxy(self, source: Path, destination: Path) -> None:
