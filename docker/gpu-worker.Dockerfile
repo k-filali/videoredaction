@@ -7,7 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONPATH=/app/apps/api/src \
     CUDA_MODULE_LOADING=LAZY \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
-    LD_LIBRARY_PATH=/usr/local/cuda-12.8/compat:/usr/local/nvidia/lib64 \
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
     PATH=/opt/clearframe/bin:$PATH
 
 WORKDIR /app
@@ -15,7 +15,6 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
         ca-certificates \
-        cuda-compat-12-8 \
         ffmpeg \
         python3 \
         python3-venv \
