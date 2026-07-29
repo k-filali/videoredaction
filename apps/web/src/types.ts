@@ -12,6 +12,12 @@ export type JobStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELL
 export type JobType = "INGEST" | "PROXY" | "DETECT" | "REPROCESS" | "EXPORT";
 export type ExportStatus = "QUEUED" | "RENDERING" | "VERIFYING" | "COMPLETED" | "FAILED";
 export type RedactionStyle = "pixelate" | "gaussian_blur" | "black_box";
+export type RedactionShape = "rectangle" | "ellipse";
+
+export interface ClassTreatment {
+  style?: RedactionStyle;
+  shape?: RedactionShape;
+}
 export type TrackSource = "MODEL" | "MANUAL" | "REPROCESSING";
 export type ReprocessingSuggestionStatus = "PENDING" | "ACCEPTED" | "DISMISSED";
 

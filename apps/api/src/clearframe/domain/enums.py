@@ -84,6 +84,11 @@ class RedactionStyle(StrEnum):
     BLACK_BOX = "black_box"
 
 
+class RedactionShape(StrEnum):
+    RECTANGLE = "rectangle"
+    ELLIPSE = "ellipse"
+
+
 class JobType(StrEnum):
     INGEST = "INGEST"
     PROXY = "PROXY"

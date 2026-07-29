@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { ExportArtifact, RedactionStyle } from "../types";
+import { defaultShapeFor } from "../lib/redaction";
+import type {
+  ClassTreatment,
+  ExportArtifact,
+  RedactionShape,
+  RedactionStyle,
+} from "../types";
 import { Icon } from "./Icon";
 
 interface ExportModalProps {
@@ -11,10 +17,13 @@ interface ExportModalProps {
   audioPresent: boolean;
   revision: number;
   style: RedactionStyle;
+  classes: string[];
+  classTreatments: Record<string, ClassTreatment>;
   exporting: boolean;
   artifact: ExportArtifact | null;
   pollError: string | null;
   onStyleChange: (style: RedactionStyle) => void;
+  onClassTreatmentsChange: (next: Record<string, ClassTreatment>) => void;
   onExport: () => void;
   onRetryStatus: () => void;
   onClose: () => void;
@@ -26,6 +35,52 @@ const styles: { value: RedactionStyle; title: string; detail: string }[] = [
   { value: "black_box", title: "Black box", detail: "Maximum visual coverage" },
 ];
 
+const presets: {
+  id: string;
+  title: string;
+  detail: string;
+  style: RedactionStyle;
+  treatments: Record<string, ClassTreatment>;
+}[] = [
+  {
+    id: "standard",
+    title: "Standard disclosure",
+    detail: "Pixelated regions, elliptical faces",
+    style: "pixelate",
+    treatments: { face: { shape: "ellipse" } },
+  },
+  {
+    id: "sensitive",
+    title: "Sensitive victim",
+    detail: "Blacked-out plates for harassment or IPV files",
+    style: "pixelate",
+    treatments: {
+      face: { shape: "ellipse" },
+      license_plate: { style: "black_box" },
+    },
+  },
+  {
+    id: "protected",
+    title: "Protected technique",
+    detail: "Blackout everything at maximum coverage",
+    style: "black_box",
+    treatments: {},
+  },
+];
+
+function classLabel(value: string): string {
+  if (value === "license_plate") return "License plates";
+  const spaced = value.replaceAll("_", " ");
+  return `${spaced.charAt(0).toUpperCase()}${spaced.slice(1)}s`;
+}
+
+function effectiveShape(
+  className: string,
+  treatments: Record<string, ClassTreatment>,
+): RedactionShape {
+  return treatments[className]?.shape ?? defaultShapeFor(className);
+}
+
 export function ExportModal({
   open,
   unresolvedCount,
@@ -34,10 +89,13 @@ export function ExportModal({
   audioPresent,
   revision,
   style,
+  classes,
+  classTreatments,
   exporting,
   artifact,
   pollError,
   onStyleChange,
+  onClassTreatmentsChange,
   onExport,
   onRetryStatus,
   onClose,
@@ -213,8 +271,29 @@ export function ExportModal({
               </div>
             </div>
 
+            <fieldset className="preset-options">
+              <legend>Case preset</legend>
+              <div className="preset-row">
+                {presets.map((preset) => (
+                  <button
+                    className="preset-chip"
+                    type="button"
+                    key={preset.id}
+                    title={preset.detail}
+                    onClick={() => {
+                      onStyleChange(preset.style);
+                      onClassTreatmentsChange({ ...preset.treatments });
+                    }}
+                  >
+                    <strong>{preset.title}</strong>
+                    <small>{preset.detail}</small>
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+
             <fieldset className="style-options">
-              <legend>Redaction treatment</legend>
+              <legend>Default redaction treatment</legend>
               {styles.map((option) => (
                 <label className={option.value === style ? "is-selected" : ""} key={option.value}>
                   <input
@@ -233,6 +312,63 @@ export function ExportModal({
                 </label>
               ))}
             </fieldset>
+
+            {classes.length > 0 && (
+              <fieldset className="class-treatment-options">
+                <legend>Per-class overrides</legend>
+                {classes.map((className) => (
+                  <div className="class-treatment-row" key={className}>
+                    <span>{classLabel(className)}</span>
+                    <label>
+                      <span className="visually-hidden">
+                        {classLabel(className)} treatment
+                      </span>
+                      <select
+                        value={classTreatments[className]?.style ?? ""}
+                        onChange={(event) =>
+                          onClassTreatmentsChange({
+                            ...classTreatments,
+                            [className]: {
+                              ...classTreatments[className],
+                              style: (event.target.value || undefined) as
+                                | RedactionStyle
+                                | undefined,
+                            },
+                          })
+                        }
+                      >
+                        <option value="">Use default</option>
+                        {styles.map((option) => (
+                          <option value={option.value} key={option.value}>
+                            {option.title}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span className="visually-hidden">
+                        {classLabel(className)} shape
+                      </span>
+                      <select
+                        value={effectiveShape(className, classTreatments)}
+                        onChange={(event) =>
+                          onClassTreatmentsChange({
+                            ...classTreatments,
+                            [className]: {
+                              ...classTreatments[className],
+                              shape: event.target.value as RedactionShape,
+                            },
+                          })
+                        }
+                      >
+                        <option value="rectangle">Rectangle</option>
+                        <option value="ellipse">Ellipse</option>
+                      </select>
+                    </label>
+                  </div>
+                ))}
+              </fieldset>
+            )}
 
             <div className="export-safety-note">
               <Icon name="shield" size={17} />

@@ -59,6 +59,7 @@ from clearframe.pipeline import (
     class_aware_nms,
 )
 from clearframe.pipeline.detection import Frame
+from clearframe.pipeline.tracking import smooth_track_points
 from clearframe.storage import ArtifactStorage
 
 
@@ -804,10 +805,12 @@ class ProcessingService:
 
             for detection_track in tracks:
                 track_id = new_id()
-                points = tuple(
-                    point
-                    for point in detection_track.points
-                    if not point.is_interpolated
+                points = smooth_track_points(
+                    tuple(
+                        point
+                        for point in detection_track.points
+                        if not point.is_interpolated
+                    )
                 )
                 warning = (
                     "; ".join(item.message for item in detection_track.warnings) or None

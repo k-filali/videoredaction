@@ -38,7 +38,13 @@ from clearframe.models import (
     VideoAsset,
     new_id,
 )
-from clearframe.rendering import Frame, SequentialRedactionLookup, redact_frame
+from clearframe.rendering import (
+    ClassTreatment,
+    Frame,
+    SequentialRedactionLookup,
+    parse_class_treatments,
+    redact_frame,
+)
 from clearframe.services.review import (
     RevisionConflictError,
     append_system_audit_event,
@@ -145,8 +151,20 @@ class ExportService:
         *,
         expected_revision: int,
         style: RedactionStyle,
+        class_treatments: dict[str, ClassTreatment] | None = None,
         reviewer_session_id: str,
     ) -> RequestedExport:
+        treatments_payload = {
+            class_name: {
+                key: value
+                for key, value in (
+                    ("style", treatment.style),
+                    ("shape", treatment.shape),
+                )
+                if value is not None
+            }
+            for class_name, treatment in (class_treatments or {}).items()
+        }
         with self.database.session() as session:
             video = session.get(VideoAsset, video_id)
             if video is None:
@@ -180,6 +198,7 @@ class ExportService:
                 id=export_id,
                 video_id=video_id,
                 redaction_style=style,
+                class_treatments=treatments_payload,
                 source_model_run_id=video.active_model_run_id,
                 review_revision=expected_revision,
                 status=ExportStatus.QUEUED,
@@ -204,6 +223,7 @@ class ExportService:
                     "export_id": export_id,
                     "frozen_review_revision": expected_revision,
                     "redaction_style": style,
+                    "class_treatments": treatments_payload,
                     "review_warnings": review_warnings,
                 },
                 reviewer_session_id=reviewer_session_id,
@@ -307,6 +327,7 @@ class ExportService:
                 destination=export_path,
                 snapshot=snapshot,
                 style=RedactionStyle(artifact.redaction_style),
+                treatments=parse_class_treatments(artifact.class_treatments),
                 fps=fps,
                 width=expected_width,
                 height=expected_height,
@@ -366,6 +387,7 @@ class ExportService:
             "model_registry_sha256": model_registry_sha256,
             "review_revision": artifact.review_revision,
             "redaction_style": artifact.redaction_style,
+            "class_treatments": artifact.class_treatments,
             "action_count": action_count,
             "unconfirmed_track_count": self._unconfirmed_track_count(snapshot),
             "redaction_track_counts": dict(sorted(track_counts.items())),
@@ -420,6 +442,7 @@ class ExportService:
         destination: Path,
         snapshot: ReviewSnapshot,
         style: RedactionStyle,
+        treatments: dict[str, ClassTreatment],
         fps: float,
         width: int,
         height: int,
@@ -438,6 +461,7 @@ class ExportService:
                     destination=temporary,
                     snapshot=snapshot,
                     style=style,
+                    treatments=treatments,
                     fps=fps,
                     width=width,
                     height=height,
@@ -505,6 +529,7 @@ class ExportService:
         destination: Path,
         snapshot: ReviewSnapshot,
         style: RedactionStyle,
+        treatments: dict[str, ClassTreatment],
         fps: float,
         width: int,
         height: int,
@@ -580,7 +605,12 @@ class ExportService:
                 if frame.shape[1] != width or frame.shape[0] != height:
                     raise ExportValidationError("decoded frame dimensions changed")
                 redactions = redaction_lookup.at_frame(frame_index)
-                rendered = redact_frame(cast(Frame, frame), redactions, style)
+                rendered = redact_frame(
+                    cast(Frame, frame),
+                    redactions,
+                    style,
+                    treatments,
+                )
                 self._write_frame(
                     process.stdin,
                     rendered.tobytes(),

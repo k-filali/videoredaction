@@ -8,6 +8,7 @@ from clearframe.domain.enums import (
     JobStatus,
     JobType,
     RedactionClass,
+    RedactionShape,
     RedactionStyle,
     ReprocessingSuggestionStatus,
     ReviewActionType,
@@ -275,9 +276,17 @@ class AuditLogRead(BaseModel):
     actions: list[AuditActionRead]
 
 
+class ClassTreatmentInput(BaseModel):
+    style: RedactionStyle | None = None
+    shape: RedactionShape | None = None
+
+
 class ExportCreate(BaseModel):
     expected_revision: int = Field(ge=0)
     redaction_style: RedactionStyle = RedactionStyle.PIXELATE
+    class_treatments: dict[RedactionClass, ClassTreatmentInput] = Field(
+        default_factory=dict
+    )
 
 
 class ExportRead(BaseModel):

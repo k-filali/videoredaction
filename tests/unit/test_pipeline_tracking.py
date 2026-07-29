@@ -8,6 +8,7 @@ from clearframe.pipeline import (
     TrackPoint,
     validate_continuity,
 )
+from clearframe.pipeline.tracking import smooth_track_points
 
 
 def detection(
@@ -185,3 +186,74 @@ def test_continuity_validator_flags_missing_span() -> None:
     assert len(warnings) == 1
     assert warnings[0].code == "missing_span"
     assert (warnings[0].start_frame, warnings[0].end_frame) == (1, 2)
+
+
+def test_smoothing_removes_jitter_from_stationary_boxes() -> None:
+    jitter = [0.0, 0.004, -0.003, 0.005, -0.004, 0.003, -0.005, 0.004, -0.002, 0.001]
+    points = tuple(
+        TrackPoint(
+            frame_index=index * 5,
+            timestamp_ms=index * 200,
+            bbox=NormalizedBox(
+                x1=0.4 + offset,
+                y1=0.4 + offset,
+                x2=0.6 + offset,
+                y2=0.6 + offset,
+            ),
+            confidence=0.9,
+        )
+        for index, offset in enumerate(jitter)
+    )
+
+    smoothed = smooth_track_points(points)
+
+    def center_x(box: NormalizedBox) -> float:
+        return (box.x1 + box.x2) / 2
+
+    raw_deviation = max(abs(center_x(point.bbox) - 0.5) for point in points)
+    smoothed_deviation = max(
+        abs(center_x(point.bbox) - 0.5) for point in smoothed[2:-2]
+    )
+    assert smoothed_deviation < raw_deviation / 2
+    assert all(
+        original.frame_index == result.frame_index
+        and original.confidence == result.confidence
+        for original, result in zip(points, smoothed, strict=True)
+    )
+
+
+def test_smoothing_preserves_linear_motion() -> None:
+    points = tuple(
+        TrackPoint(
+            frame_index=index * 5,
+            timestamp_ms=index * 200,
+            bbox=NormalizedBox(
+                x1=0.1 + index * 0.05,
+                y1=0.3,
+                x2=0.2 + index * 0.05,
+                y2=0.4,
+            ),
+            confidence=0.9,
+        )
+        for index in range(10)
+    )
+
+    smoothed = smooth_track_points(points)
+
+    for original, result in zip(points[2:-2], smoothed[2:-2], strict=True):
+        assert result.bbox.x1 == pytest.approx(original.bbox.x1, abs=1e-9)
+        assert result.bbox.x2 == pytest.approx(original.bbox.x2, abs=1e-9)
+
+
+def test_smoothing_passes_short_tracks_through() -> None:
+    points = tuple(
+        TrackPoint(
+            frame_index=index,
+            timestamp_ms=index * 40,
+            bbox=NormalizedBox(x1=0.1, y1=0.1, x2=0.2, y2=0.2),
+            confidence=0.5,
+        )
+        for index in range(2)
+    )
+
+    assert smooth_track_points(points) == points

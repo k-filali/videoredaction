@@ -1,13 +1,14 @@
 from bisect import bisect_left
 from dataclasses import dataclass
 from itertools import pairwise
+from typing import cast
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from clearframe.domain.enums import RedactionStyle
-from clearframe.domain.geometry import NormalizedBox
+from clearframe.domain.enums import RedactionShape, RedactionStyle
+from clearframe.domain.geometry import NormalizedBox, PixelBox
 from clearframe.domain.review import ReviewKeyframe, ReviewSnapshot, TrackReviewState
 
 Frame = NDArray[np.uint8]
@@ -20,11 +21,50 @@ class ActiveRedaction:
     bbox: NormalizedBox
 
 
+@dataclass(frozen=True, slots=True)
+class ClassTreatment:
+    style: RedactionStyle | None = None
+    shape: RedactionShape | None = None
+
+
 DEFAULT_PADDING: dict[str, float] = {
     "license_plate": 0.15,
     "face": 0.25,
     "scene_text": 0.12,
 }
+
+DEFAULT_SHAPES: dict[str, RedactionShape] = {
+    "face": RedactionShape.ELLIPSE,
+}
+
+
+def resolve_treatment(
+    class_name: str,
+    default_style: RedactionStyle,
+    treatments: dict[str, ClassTreatment] | None = None,
+) -> tuple[RedactionStyle, RedactionShape]:
+    treatment = (treatments or {}).get(class_name)
+    style = treatment.style if treatment and treatment.style else default_style
+    shape = (
+        treatment.shape
+        if treatment and treatment.shape
+        else DEFAULT_SHAPES.get(class_name, RedactionShape.RECTANGLE)
+    )
+    return style, shape
+
+
+def parse_class_treatments(raw: dict[str, object]) -> dict[str, ClassTreatment]:
+    treatments: dict[str, ClassTreatment] = {}
+    for class_name, value in raw.items():
+        if not isinstance(value, dict):
+            raise ValueError("class treatment entries must be objects")
+        style_value = value.get("style")
+        shape_value = value.get("shape")
+        treatments[str(class_name)] = ClassTreatment(
+            style=RedactionStyle(style_value) if style_value is not None else None,
+            shape=RedactionShape(shape_value) if shape_value is not None else None,
+        )
+    return treatments
 
 
 @dataclass(slots=True)
@@ -189,10 +229,38 @@ def redactions_at_frame(
     return active
 
 
+def _styled_region(region: Frame, style: RedactionStyle, pixels: PixelBox) -> Frame:
+    if style == RedactionStyle.BLACK_BOX:
+        return np.zeros_like(region)
+    if style == RedactionStyle.PIXELATE:
+        reduced_width = max(1, pixels.width // 12)
+        reduced_height = max(1, pixels.height // 12)
+        reduced = cv2.resize(
+            region,
+            (reduced_width, reduced_height),
+            interpolation=cv2.INTER_AREA,
+        )
+        return cast(
+            Frame,
+            cv2.resize(
+                reduced,
+                (pixels.width, pixels.height),
+                interpolation=cv2.INTER_NEAREST,
+            ),
+        )
+    if style == RedactionStyle.GAUSSIAN_BLUR:
+        kernel = max(3, min(pixels.width, pixels.height) // 3)
+        if kernel % 2 == 0:
+            kernel += 1
+        return cast(Frame, cv2.GaussianBlur(region, (kernel, kernel), 0))
+    raise ValueError(f"unsupported redaction style: {style}")
+
+
 def redact_frame(
     frame: Frame,
     redactions: list[ActiveRedaction],
     style: RedactionStyle,
+    treatments: dict[str, ClassTreatment] | None = None,
 ) -> Frame:
     if frame.ndim != 3 or frame.shape[2] != 3:
         raise ValueError("renderer expects a three-channel BGR frame")
@@ -205,26 +273,25 @@ def redact_frame(
         if region.size == 0:
             continue
 
-        if style == RedactionStyle.BLACK_BOX:
-            region[:] = 0
-        elif style == RedactionStyle.PIXELATE:
-            reduced_width = max(1, pixels.width // 12)
-            reduced_height = max(1, pixels.height // 12)
-            reduced = cv2.resize(
-                region,
-                (reduced_width, reduced_height),
-                interpolation=cv2.INTER_AREA,
+        region_style, region_shape = resolve_treatment(
+            redaction.class_name,
+            style,
+            treatments,
+        )
+        styled = _styled_region(region, region_style, pixels)
+        if region_shape == RedactionShape.ELLIPSE:
+            mask = np.zeros((pixels.height, pixels.width), dtype=np.uint8)
+            cv2.ellipse(
+                mask,
+                (pixels.width // 2, pixels.height // 2),
+                (max(1, pixels.width // 2), max(1, pixels.height // 2)),
+                0,
+                0,
+                360,
+                255,
+                -1,
             )
-            region[:] = cv2.resize(
-                reduced,
-                (pixels.width, pixels.height),
-                interpolation=cv2.INTER_NEAREST,
-            )
-        elif style == RedactionStyle.GAUSSIAN_BLUR:
-            kernel = max(3, min(pixels.width, pixels.height) // 3)
-            if kernel % 2 == 0:
-                kernel += 1
-            region[:] = cv2.GaussianBlur(region, (kernel, kernel), 0)
+            region[mask > 0] = styled[mask > 0]
         else:
-            raise ValueError(f"unsupported redaction style: {style}")
+            region[:] = styled
     return output

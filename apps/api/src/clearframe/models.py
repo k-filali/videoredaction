@@ -235,6 +235,7 @@ class ExportArtifact(Base):
     export_sha256: Mapped[str | None] = mapped_column(String(64))
     manifest_uri: Mapped[str | None] = mapped_column(Text)
     redaction_style: Mapped[str] = mapped_column(String(24), default=RedactionStyle.PIXELATE)
+    class_treatments: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     source_model_run_id: Mapped[str | None] = mapped_column(
         ForeignKey("model_runs.id", ondelete="SET NULL"),
     )

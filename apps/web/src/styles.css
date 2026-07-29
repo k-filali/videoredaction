@@ -2234,6 +2234,83 @@ kbd {
   font-size: 0.58rem;
 }
 
+.preset-options,
+.class-treatment-options {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.preset-options legend,
+.class-treatment-options legend {
+  margin-bottom: 0.4rem;
+  padding: 0;
+  color: #6f827b;
+  font-size: 0.52rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.preset-chip {
+  display: flex;
+  flex: 1 1 8rem;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.42rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  color: #c3d4ce;
+  background: rgba(180, 205, 197, 0.03);
+  cursor: pointer;
+  text-align: left;
+}
+
+.preset-chip:hover,
+.preset-chip:focus-visible {
+  border-color: rgba(101, 217, 180, 0.5);
+  background: rgba(101, 217, 180, 0.07);
+}
+
+.preset-chip strong {
+  font-size: 0.6rem;
+}
+
+.preset-chip small {
+  color: #6f827b;
+  font-size: 0.5rem;
+}
+
+.class-treatment-row {
+  display: grid;
+  align-items: center;
+  padding: 0.3rem 0;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.4rem;
+}
+
+.class-treatment-row > span {
+  overflow: hidden;
+  color: #a9bab4;
+  font-size: 0.58rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.class-treatment-row select {
+  padding: 0.22rem 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 0.28rem;
+  color: #c3d4ce;
+  background: #0d1614;
+  font-size: 0.54rem;
+}
+
 .export-warning-list {
   display: flex;
   flex-direction: column;

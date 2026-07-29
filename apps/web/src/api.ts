@@ -1,5 +1,6 @@
 import type {
   AuditLog,
+  ClassTreatment,
   ExportAccepted,
   ExportArtifact,
   ModelRun,
@@ -192,12 +193,18 @@ export const api = {
       body: JSON.stringify(input),
     }),
 
-  requestExport: (videoId: string, expectedRevision: number, style: RedactionStyle) =>
+  requestExport: (
+    videoId: string,
+    expectedRevision: number,
+    style: RedactionStyle,
+    classTreatments: Record<string, ClassTreatment> = {},
+  ) =>
     request<ExportAccepted>(`/api/videos/${videoId}/exports`, {
       method: "POST",
       body: JSON.stringify({
         expected_revision: expectedRevision,
         redaction_style: style,
+        class_treatments: classTreatments,
       }),
     }),
 

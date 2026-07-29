@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from clearframe.domain.enums import RedactionStyle, TrackSource
+from clearframe.domain.enums import RedactionShape, RedactionStyle, TrackSource
 from clearframe.domain.geometry import NormalizedBox
 from clearframe.domain.review import (
     ReviewKeyframe,
@@ -9,10 +9,13 @@ from clearframe.domain.review import (
     TrackReviewState,
 )
 from clearframe.rendering import (
+    ClassTreatment,
     SequentialRedactionLookup,
     box_at_frame,
+    parse_class_treatments,
     redact_frame,
     redactions_at_frame,
+    resolve_treatment,
 )
 
 
@@ -133,3 +136,87 @@ def test_all_rendering_styles_modify_the_target_region() -> None:
         assert not np.array_equal(rendered, frame)
         assert rendered.shape == frame.shape
         assert rendered.dtype == frame.dtype
+
+
+def build_face_track() -> TrackReviewState:
+    return TrackReviewState(
+        track_id="face-track",
+        class_name="face",
+        source=TrackSource.MODEL,
+        start_frame=0,
+        end_frame=10,
+        start_ms=0,
+        end_ms=1000,
+        keyframes=[
+            ReviewKeyframe(
+                frame_index=0,
+                timestamp_ms=0,
+                bbox=NormalizedBox(x1=0.2, y1=0.2, x2=0.6, y2=0.6),
+            ),
+        ],
+    )
+
+
+def test_faces_default_to_elliptical_redaction() -> None:
+    frame = np.full((100, 100, 3), 180, dtype=np.uint8)
+    snapshot = ReviewSnapshot(
+        video_id="video",
+        revision=0,
+        tracks={"face-track": build_face_track()},
+    )
+    redactions = redactions_at_frame(snapshot, 5, padding={"face": 0.0})
+
+    rendered = redact_frame(frame, redactions, RedactionStyle.BLACK_BOX)
+
+    assert np.all(rendered[40, 40] == 0)
+    assert np.all(rendered[21, 21] == 180)
+    assert np.all(rendered[21, 58] == 180)
+
+
+def test_class_treatments_override_shape_and_style() -> None:
+    frame = np.full((100, 100, 3), 180, dtype=np.uint8)
+    snapshot = ReviewSnapshot(
+        video_id="video",
+        revision=0,
+        tracks={"face-track": build_face_track()},
+    )
+    redactions = redactions_at_frame(snapshot, 5, padding={"face": 0.0})
+
+    rendered = redact_frame(
+        frame,
+        redactions,
+        RedactionStyle.PIXELATE,
+        {
+            "face": ClassTreatment(
+                style=RedactionStyle.BLACK_BOX,
+                shape=RedactionShape.RECTANGLE,
+            )
+        },
+    )
+
+    assert np.all(rendered[40, 40] == 0)
+    assert np.all(rendered[21, 21] == 0)
+    assert np.all(rendered[21, 58] == 0)
+
+
+def test_parse_class_treatments_round_trips_and_validates() -> None:
+    parsed = parse_class_treatments(
+        {"face": {"style": "black_box", "shape": "ellipse"}, "license_plate": {}}
+    )
+
+    assert parsed["face"].style is RedactionStyle.BLACK_BOX
+    assert parsed["face"].shape is RedactionShape.ELLIPSE
+    assert parsed["license_plate"].style is None
+    assert parsed["license_plate"].shape is None
+    assert resolve_treatment("face", RedactionStyle.PIXELATE, parsed) == (
+        RedactionStyle.BLACK_BOX,
+        RedactionShape.ELLIPSE,
+    )
+    assert resolve_treatment("license_plate", RedactionStyle.PIXELATE, parsed) == (
+        RedactionStyle.PIXELATE,
+        RedactionShape.RECTANGLE,
+    )
+    with pytest.raises(ValueError):
+        parse_class_treatments({"face": {"style": "not-a-style"}})
+    with pytest.raises(ValueError):
+        parse_class_treatments({"face": "black_box"})

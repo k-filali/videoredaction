@@ -10,6 +10,7 @@ from clearframe.api.schemas import ExportAccepted, ExportCreate, ExportRead, Job
 from clearframe.database import Database
 from clearframe.domain.enums import ExportStatus
 from clearframe.models import ExportArtifact
+from clearframe.rendering import ClassTreatment
 from clearframe.services.container import ServiceContainer
 from clearframe.services.export import (
     ExportNotFoundError,
@@ -79,6 +80,13 @@ def request_export(
             video_id,
             expected_revision=request.expected_revision,
             style=request.redaction_style,
+            class_treatments={
+                class_name.value: ClassTreatment(
+                    style=treatment.style,
+                    shape=treatment.shape,
+                )
+                for class_name, treatment in request.class_treatments.items()
+            },
             reviewer_session_id=reviewer_session,
         )
     except RevisionConflictError as exc:

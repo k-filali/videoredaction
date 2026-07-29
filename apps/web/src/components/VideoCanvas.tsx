@@ -9,8 +9,15 @@ import {
 } from "react";
 
 import { boxAtFrame, isUsefulBox, moveBox, normalizeBox, resizeBox } from "../lib/geometry";
+import { resolveTreatment } from "../lib/redaction";
 import { buildTrackFrameIndex, tracksAtFrame } from "../lib/reviewPerformance";
-import type { NormalizedBox, RedactionStyle, ReviewTrack } from "../types";
+import type {
+  ClassTreatment,
+  NormalizedBox,
+  RedactionShape,
+  RedactionStyle,
+  ReviewTrack,
+} from "../types";
 
 export interface VideoCanvasHandle {
   togglePlayback: () => void;
@@ -27,6 +34,7 @@ interface VideoCanvasProps {
   selectedTrackId: string | null;
   frameRate: number;
   style: RedactionStyle;
+  classTreatments: Record<string, ClassTreatment>;
   showRedactions: boolean;
   showBoxes: boolean;
   manualMode: boolean;
@@ -80,11 +88,37 @@ function paddedBox(box: NormalizedBox, className: string): NormalizedBox {
   };
 }
 
+function clipToShape(
+  context: CanvasRenderingContext2D,
+  shape: RedactionShape,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+) {
+  context.beginPath();
+  if (shape === "ellipse") {
+    context.ellipse(
+      x + width / 2,
+      y + height / 2,
+      width / 2,
+      height / 2,
+      0,
+      0,
+      Math.PI * 2,
+    );
+  } else {
+    context.rect(x, y, width, height);
+  }
+  context.clip();
+}
+
 function redactRegion(
   context: CanvasRenderingContext2D,
   source: HTMLVideoElement,
   box: NormalizedBox,
   style: RedactionStyle,
+  shape: RedactionShape,
   pixelBuffer: PixelBuffer,
 ) {
   const canvas = context.canvas;
@@ -96,8 +130,11 @@ function redactRegion(
   const height = y2 - y;
 
   if (style === "black_box") {
+    context.save();
+    clipToShape(context, shape, x, y, width, height);
     context.fillStyle = "#000";
     context.fillRect(x, y, width, height);
+    context.restore();
     return;
   }
 
@@ -117,6 +154,7 @@ function redactRegion(
       sampleHeight,
     );
     context.save();
+    clipToShape(context, shape, x, y, width, height);
     context.imageSmoothingEnabled = false;
     context.drawImage(
       pixelBuffer.canvas,
@@ -137,9 +175,7 @@ function redactRegion(
   if (kernel % 2 === 0) kernel += 1;
   const sigma = Math.max(1, 0.3 * ((kernel - 1) * 0.5 - 1) + 0.8);
   context.save();
-  context.beginPath();
-  context.rect(x, y, width, height);
-  context.clip();
+  clipToShape(context, shape, x, y, width, height);
   context.filter = `blur(${sigma}px)`;
   context.drawImage(source, 0, 0, canvas.width, canvas.height);
   context.restore();
@@ -154,6 +190,7 @@ export const VideoCanvas = forwardRef<VideoCanvasHandle, VideoCanvasProps>(
       selectedTrackId,
       frameRate,
       style,
+      classTreatments,
       showRedactions,
       showBoxes,
       manualMode,
@@ -281,11 +318,17 @@ export const VideoCanvas = forwardRef<VideoCanvasHandle, VideoCanvasProps>(
           if (!track.active || !track.redacted) return;
           const box = boxAtFrame(track, currentFrame);
           if (box) {
+            const treatment = resolveTreatment(
+              track.class_name,
+              style,
+              classTreatments,
+            );
             redactRegion(
               context,
               video,
               paddedBox(box, track.class_name),
-              style,
+              treatment.style,
+              treatment.shape,
               pixelBuffer,
             );
           }
@@ -296,7 +339,7 @@ export const VideoCanvas = forwardRef<VideoCanvasHandle, VideoCanvasProps>(
         setFrame(currentFrame);
         onTimeChange(video.currentTime * 1000, currentFrame);
       }
-    }, [frameRate, onTimeChange, showRedactions, style, trackIndex]);
+    }, [classTreatments, frameRate, onTimeChange, showRedactions, style, trackIndex]);
 
     drawRef.current = draw;
 

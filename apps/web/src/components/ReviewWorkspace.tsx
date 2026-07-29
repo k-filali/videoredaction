@@ -12,6 +12,7 @@ import { boxAtFrame, formatTime } from "../lib/geometry";
 import type {
   AuditAction,
   AuditLog,
+  ClassTreatment,
   ExportArtifact,
   NormalizedBox,
   RedactionStyle,
@@ -278,6 +279,9 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
   const [auditOpen, setAuditOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportWarnings, setExportWarnings] = useState<string[]>([]);
+  const [classTreatments, setClassTreatments] = useState<
+    Record<string, ClassTreatment>
+  >({});
   const [detectionKits, setDetectionKits] = useState<Set<string>>(
     new Set(detectionKitOptions.map((option) => option.id)),
   );
@@ -992,7 +996,12 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
     setExporting(true);
     let accepted: Awaited<ReturnType<typeof api.requestExport>>;
     try {
-      accepted = await api.requestExport(videoId, snapshot.revision, previewStyle);
+      accepted = await api.requestExport(
+        videoId,
+        snapshot.revision,
+        previewStyle,
+        classTreatments,
+      );
     } catch (exportError) {
       setExporting(false);
       await handleMutationFailure(exportError);
@@ -1008,6 +1017,7 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
       );
     });
   }, [
+    classTreatments,
     exporting,
     handleMutationFailure,
     onNotify,
@@ -1437,6 +1447,7 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
               selectedTrackId={selectedTrackId}
               frameRate={video.fps ?? 30}
               style={previewStyle}
+              classTreatments={classTreatments}
               showRedactions={showRedactions}
               showBoxes={showBoxes}
               manualMode={manualMode}
@@ -1875,10 +1886,13 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
         audioPresent={video.audio_present === true}
         revision={snapshot.revision}
         style={previewStyle}
+        classes={classes}
+        classTreatments={classTreatments}
         exporting={exporting}
         artifact={artifact}
         pollError={exportPollError}
         onStyleChange={setPreviewStyle}
+        onClassTreatmentsChange={setClassTreatments}
         onExport={() => void startExport()}
         onRetryStatus={retryExportPolling}
         onClose={() => {

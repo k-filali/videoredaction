@@ -11,7 +11,8 @@ source file.
 - GPU-accelerated licence-plate and face detection with motion-aware tracking
 - Reviewer controls for accepting, rejecting, moving, resizing, trimming, and creating regions
 - Context suggestions around edited keyframes without overwriting reviewer decisions
-- Pixelated, blurred, or black-box exports rendered from a frozen review revision
+- Pixelated, blurred, or black-box exports rendered from a frozen review revision, with
+  per-class style and shape overrides (elliptical face masks by default) and case presets
 - Append-only review history, export manifests, and output checksum verification
 - A virtualized React review workspace with smooth native video playback
 
@@ -77,7 +78,8 @@ The default pipeline runs two local ONNX models: YOLOv9-t for licence plates and
 Both prefer the CUDA execution provider and fall back to CPU in the CPU Compose profile. Their
 weights are included in `configs/models/weights`, verified by SHA-256 at startup, and configured in
 `configs/models/registry.yaml`. Detection samples the review proxy, applies class-specific
-suppression, links detections with motion-aware tracking, and interpolates short gaps for review.
+suppression, links detections with motion-aware tracking, interpolates short gaps for review, and
+smooths keyframe geometry with a centered moving average so stationary subjects do not jitter.
 
 The plate model is distributed by
 [Open Image Models](https://github.com/ankandrew/open-image-models) under the MIT licence. The face

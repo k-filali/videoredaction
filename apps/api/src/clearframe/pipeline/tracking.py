@@ -1,5 +1,5 @@
-from collections.abc import Iterable
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field, replace
 from math import exp, hypot, log
 
 from clearframe.domain.geometry import NormalizedBox
@@ -144,6 +144,38 @@ def _box_from_geometry(
         x2=center_x + width / 2,
         y2=center_y + height / 2,
     )
+
+
+def smooth_track_points(
+    points: Sequence[TrackPoint],
+    *,
+    window: int = 5,
+) -> tuple[TrackPoint, ...]:
+    """Suppress detector jitter with a centered moving average over box geometry.
+
+    A centered window preserves linear motion exactly, so smoothing only
+    removes high-frequency oscillation rather than introducing tracking lag.
+    """
+    if window < 3 or len(points) < 3:
+        return tuple(points)
+    half = window // 2
+    geometries = [_box_geometry(point.bbox) for point in points]
+    smoothed: list[TrackPoint] = []
+    for index, point in enumerate(points):
+        neighborhood = geometries[max(0, index - half) : index + half + 1]
+        count = len(neighborhood)
+        smoothed.append(
+            replace(
+                point,
+                bbox=_box_from_geometry(
+                    sum(geometry[0] for geometry in neighborhood) / count,
+                    sum(geometry[1] for geometry in neighborhood) / count,
+                    sum(geometry[2] for geometry in neighborhood) / count,
+                    sum(geometry[3] for geometry in neighborhood) / count,
+                ),
+            )
+        )
+    return tuple(smoothed)
 
 
 def _predict_box(state: _TrackState, frame_index: int) -> NormalizedBox:
