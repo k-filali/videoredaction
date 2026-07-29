@@ -1,6 +1,8 @@
 steps:
   - id: api
     name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
     args:
       - build
       - --file=docker/api.Dockerfile
@@ -8,6 +10,8 @@ steps:
       - .
   - id: gpu-worker
     name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
     args:
       - build
       - --file=docker/gpu-worker.Dockerfile
@@ -15,6 +19,8 @@ steps:
       - .
   - id: web
     name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
     args:
       - build
       - --file=docker/web.Dockerfile

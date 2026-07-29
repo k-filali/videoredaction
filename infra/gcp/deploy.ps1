@@ -85,7 +85,14 @@ function Invoke-Gcloud {
 
 function Test-GcloudResource {
     param([Parameter(Mandatory)][string[]] $Arguments)
-    & gcloud @Arguments *> $null
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & gcloud @Arguments *> $null
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
     return $LASTEXITCODE -eq 0
 }
 
@@ -95,7 +102,7 @@ function New-TemporaryJson {
         [System.IO.Path]::GetTempPath(),
         "clearframe-$([guid]::NewGuid().ToString('N')).json"
     )
-    $json = $Value | ConvertTo-Json -Depth 10
+    $json = ConvertTo-Json -InputObject $Value -Depth 10
     [System.IO.File]::WriteAllText(
         $path,
         $json,
@@ -135,7 +142,13 @@ function Read-PlainTextSecret {
 
 function New-RandomAccessToken {
     $bytes = [byte[]]::new(48)
-    [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    }
+    finally {
+        $rng.Dispose()
+    }
     return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 }
 
@@ -739,6 +752,13 @@ try {
         '--format=value(serviceAccountEmail)'
     )
     if ($buildAccount) {
+        Invoke-Gcloud @(
+            'projects', 'add-iam-policy-binding', $ProjectId,
+            "--member=serviceAccount:$buildAccount",
+            '--role=roles/cloudbuild.builds.builder',
+            '--condition=None',
+            '--quiet'
+        ) | Out-Null
         Invoke-Gcloud @(
             'artifacts', 'repositories', 'add-iam-policy-binding', $Repository,
             "--location=$Region",
