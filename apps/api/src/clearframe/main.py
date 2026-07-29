@@ -7,34 +7,53 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from clearframe import __version__
-from clearframe.config import get_settings
-from clearframe.database import database
+from clearframe.api.videos import router as videos_router
+from clearframe.config import Settings, get_settings
+from clearframe.database import Database
+from clearframe.services.container import ServiceContainer
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    settings = get_settings()
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings: Settings = app.state.settings
     settings.storage_root.mkdir(parents=True, exist_ok=True)
     Path("data").mkdir(parents=True, exist_ok=True)
-    database.create_schema()
-    yield
+    app.state.database.create_schema()
+    app.state.services.runner.recover_interrupted_jobs()
+    try:
+        yield
+    finally:
+        app.state.services.runner.shutdown()
 
 
-def create_app() -> FastAPI:
-    settings = get_settings()
+def create_app(
+    settings: Settings | None = None,
+    database: Database | None = None,
+    services: ServiceContainer | None = None,
+) -> FastAPI:
+    resolved_settings = settings or get_settings()
+    resolved_database = database or Database(resolved_settings.database_url)
+    resolved_services = services or ServiceContainer.build(
+        resolved_settings,
+        resolved_database,
+    )
     app = FastAPI(
         title="ClearFrame API",
         version=__version__,
         description="Local-first, human-reviewed video redaction research prototype.",
         lifespan=lifespan,
     )
+    app.state.settings = resolved_settings
+    app.state.database = resolved_database
+    app.state.services = resolved_services
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.web_origin],
+        allow_origins=[resolved_settings.web_origin],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.include_router(videos_router)
 
     @app.get("/api/health", tags=["system"])
     async def health() -> dict[str, str]:

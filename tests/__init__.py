@@ -1,0 +1,2 @@
+"""ClearFrame test suite."""
+
