@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/clearframe.db"
     storage_root: Path = Path("./storage")
     max_upload_mb: int = Field(default=2048, gt=0)
+    max_duration_minutes: int = Field(default=240, ge=1, le=1440)
+    max_video_pixels: int = Field(default=9_000_000, ge=307_200)
+    max_video_dimension: int = Field(default=8192, ge=640)
+    max_video_fps: float = Field(default=120.0, ge=1.0, le=240.0)
     ffmpeg_path: Path | None = None
     ffprobe_path: Path | None = None
     model_registry_path: Path = Path("configs/models/registry.yaml")

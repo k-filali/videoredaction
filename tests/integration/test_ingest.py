@@ -11,7 +11,13 @@ from clearframe.config import Settings
 from clearframe.database import Database
 from clearframe.domain.enums import JobStatus, VideoStatus
 from clearframe.main import create_app
-from clearframe.media import MediaProcessor, UnsupportedMediaError, sha256_file, sniff_media
+from clearframe.media import (
+    MediaError,
+    MediaProcessor,
+    UnsupportedMediaError,
+    sha256_file,
+    sniff_media,
+)
 from clearframe.models import ProcessingJob, VideoAsset
 from clearframe.services.container import ServiceContainer
 from clearframe.services.ingest import DuplicateVideoError, IngestService
@@ -47,6 +53,22 @@ def test_media_probe_proxy_and_checksum(tmp_path: Path) -> None:
     assert proxy_metadata.width <= 1280
     assert proxy_metadata.height <= 720
     assert sha256_file(source) != sha256_file(proxy)
+
+
+def test_media_probe_enforces_resource_limits(tmp_path: Path) -> None:
+    media = MediaProcessor()
+    source = generate_test_video(tmp_path / "limited.mp4", media)
+
+    with pytest.raises(MediaError, match="duration exceeds"):
+        MediaProcessor(
+            media.ffmpeg_path,
+            max_duration_ms=500,
+        ).probe(source)
+    with pytest.raises(MediaError, match="pixel count exceeds"):
+        MediaProcessor(
+            media.ffmpeg_path,
+            max_video_pixels=100_000,
+        ).probe(source)
 
 
 def test_corrupt_container_is_rejected(tmp_path: Path) -> None:

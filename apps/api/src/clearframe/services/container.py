@@ -23,7 +23,13 @@ class ServiceContainer:
     @classmethod
     def build(cls, settings: Settings, database: Database) -> "ServiceContainer":
         storage = LocalStorage(settings.storage_root)
-        media = MediaProcessor(settings.ffmpeg_path)
+        media = MediaProcessor(
+            settings.ffmpeg_path,
+            max_duration_ms=settings.max_duration_minutes * 60 * 1000,
+            max_video_pixels=settings.max_video_pixels,
+            max_video_dimension=settings.max_video_dimension,
+            max_video_fps=settings.max_video_fps,
+        )
         runner = LocalJobRunner(database)
         ingest = IngestService(
             database=database,

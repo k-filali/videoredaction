@@ -331,6 +331,9 @@ class ExportService:
 
         command = [
             str(self.media.ffmpeg_path),
+            "-nostdin",
+            "-max_alloc",
+            str(256 * 1024 * 1024),
             "-y",
             "-v",
             "error",
@@ -344,6 +347,8 @@ class ExportService:
             f"{fps:.8f}",
             "-i",
             "pipe:0",
+            "-protocol_whitelist",
+            "file,pipe",
             "-i",
             str(source),
             "-map",

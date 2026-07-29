@@ -66,8 +66,27 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 class MediaProcessor:
-    def __init__(self, ffmpeg_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        ffmpeg_path: Path | None = None,
+        *,
+        max_duration_ms: int = 240 * 60 * 1000,
+        max_video_pixels: int = 9_000_000,
+        max_video_dimension: int = 8192,
+        max_video_fps: float = 120.0,
+    ) -> None:
         self.ffmpeg_path = self._resolve_ffmpeg(ffmpeg_path)
+        self.max_duration_ms = max_duration_ms
+        self.max_video_pixels = max_video_pixels
+        self.max_video_dimension = max_video_dimension
+        self.max_video_fps = max_video_fps
+        if (
+            max_duration_ms <= 0
+            or max_video_pixels <= 0
+            or max_video_dimension <= 0
+            or max_video_fps <= 0
+        ):
+            raise ValueError("media limits must be positive")
 
     @staticmethod
     def _resolve_ffmpeg(configured_path: Path | None) -> Path:
@@ -90,7 +109,13 @@ class MediaProcessor:
     ) -> subprocess.CompletedProcess[str]:
         try:
             result = subprocess.run(
-                [str(self.ffmpeg_path), *arguments],
+                [
+                    str(self.ffmpeg_path),
+                    "-nostdin",
+                    "-max_alloc",
+                    str(256 * 1024 * 1024),
+                    *arguments,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -107,12 +132,14 @@ class MediaProcessor:
         inspection = self._run(
             [
                 "-hide_banner",
+                "-protocol_whitelist",
+                "file,pipe",
                 "-i",
                 str(path),
                 "-map",
                 "0:v:0",
-                "-frames:v",
-                "1",
+                "-t",
+                "0",
                 "-f",
                 "null",
                 "-",
@@ -147,11 +174,22 @@ class MediaProcessor:
             raise MediaError("video dimensions are invalid")
         if fps <= 0 or duration_seconds <= 0:
             raise MediaError("video duration or frame rate is invalid")
+        duration_ms = round(duration_seconds * 1000)
+        if duration_ms > self.max_duration_ms:
+            raise MediaError("video duration exceeds the configured limit")
+        if width > self.max_video_dimension or height > self.max_video_dimension:
+            raise MediaError("video dimensions exceed the configured limit")
+        if width * height > self.max_video_pixels:
+            raise MediaError("video pixel count exceeds the configured limit")
+        if fps > self.max_video_fps:
+            raise MediaError("video frame rate exceeds the configured limit")
 
         self._run(
             [
                 "-v",
                 "error",
+                "-protocol_whitelist",
+                "file,pipe",
                 "-i",
                 str(path),
                 "-map",
@@ -166,7 +204,7 @@ class MediaProcessor:
             failure_message="video validation failed",
         )
         return MediaMetadata(
-            duration_ms=round(duration_seconds * 1000),
+            duration_ms=duration_ms,
             fps=fps,
             width=width,
             height=height,
@@ -186,6 +224,8 @@ class MediaProcessor:
                 "-y",
                 "-v",
                 "error",
+                "-protocol_whitelist",
+                "file,pipe",
                 "-i",
                 str(source),
                 "-map",
@@ -230,6 +270,8 @@ class MediaProcessor:
                 "error",
                 "-ss",
                 f"{seek_seconds:.3f}",
+                "-protocol_whitelist",
+                "file,pipe",
                 "-i",
                 str(source),
                 "-frames:v",
