@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,6 +50,7 @@ from clearframe.pipeline import (
     IoUTracker,
     MockPlateDetector,
     OnnxRuntimeYoloV9PlateDetector,
+    OnnxRuntimeYuNetFaceDetector,
     OpenCVFaceCascadeDetector,
     OpenCVPlateCascadeDetector,
     OpenCVYoloV8PlateDetector,
@@ -106,6 +108,59 @@ class _ObservedDetection:
     inference_ms: float
     proposal_source: ProposalSource
     nms_suppressed: bool = False
+
+
+_DetectorResult = tuple[
+    _DetectorBinding,
+    list[DetectionProposal],
+    float,
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingFrame:
+    frame_index: int
+    futures: tuple[Future[_DetectorResult], ...]
+
+
+def _run_detector(
+    binding: _DetectorBinding,
+    frame: Frame,
+    context: DetectionContext,
+) -> _DetectorResult:
+    started = perf_counter()
+    proposals = binding.detector.detect(frame, context)
+    inference_ms = (perf_counter() - started) * 1000
+    return binding, proposals, inference_ms
+
+
+def _detector_device(detector: Detector) -> str:
+    device = getattr(detector, "device", None)
+    return device if isinstance(device, str) else "cpu"
+
+
+def _detector_max_concurrency(detector: Detector) -> int:
+    value = getattr(detector, "max_concurrency", 1)
+    return value if isinstance(value, int) and value > 0 else 1
+
+
+def _run_device(bindings: tuple[_DetectorBinding, ...]) -> str:
+    devices = sorted({_detector_device(binding.detector) for binding in bindings})
+    return "+".join(devices)
+
+
+def _detector_version(binding: _DetectorBinding) -> dict[str, str]:
+    metadata = {
+        "adapter": binding.entry.adapter,
+        "adapter_version": binding.entry.adapter_version,
+        "model_version": binding.entry.model_version,
+        "runtime_version": binding.detector.version,
+        "device": _detector_device(binding.detector),
+    }
+    provider = getattr(binding.detector, "provider", None)
+    if isinstance(provider, str):
+        metadata["execution_provider"] = provider
+    return metadata
 
 
 class ProcessingService:
@@ -190,12 +245,7 @@ class ProcessingService:
             run = ModelRun(
                 video_id=video_id,
                 detector_versions={
-                    binding.entry.id: {
-                        "adapter": binding.entry.adapter,
-                        "adapter_version": binding.entry.adapter_version,
-                        "model_version": binding.entry.model_version,
-                        "runtime_version": binding.detector.version,
-                    }
+                    binding.entry.id: _detector_version(binding)
                     for binding in bindings
                 },
                 tracker_name=IoUTracker.name,
@@ -205,7 +255,7 @@ class ProcessingService:
                     for binding in bindings
                 },
                 config_hash=self.registry.config_fingerprint,
-                device="cpu",
+                device=_run_device(bindings),
                 status=RunStatus.QUEUED,
                 metrics={},
             )
@@ -300,6 +350,18 @@ class ProcessingService:
             raise DetectorSelectionError(f"{entry.id}: model weights are not configured")
 
         classes = set(entry.supported_classes)
+        if entry.adapter is AdapterKind.ONNXRUNTIME_YUNET:
+            if classes == {DetectorClass.FACE}:
+                return OnnxRuntimeYuNetFaceDetector(
+                    model_path,
+                    confidence_threshold=entry.thresholds.confidence,
+                    nms_threshold=entry.thresholds.nms_iou,
+                    min_face_size_pixels=entry.thresholds.min_size_pixels,
+                )
+            raise DetectorSelectionError(
+                f"{entry.id}: YuNet adapter must support exactly one known class"
+            )
+
         if entry.adapter is AdapterKind.OPENCV_YUNET:
             if classes == {DetectorClass.FACE}:
                 return OpenCVYuNetFaceDetector(
@@ -422,11 +484,115 @@ class ProcessingService:
             if any(class_name in binding.entry.supported_classes for binding in bindings)
         }
 
+        detector_concurrency = tuple(
+            _detector_max_concurrency(binding.detector)
+            for binding in bindings
+        )
+        detector_pools = tuple(
+            ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix=f"clearframe-{binding.entry.id}",
+            )
+            for binding, max_workers in zip(
+                bindings,
+                detector_concurrency,
+                strict=True,
+            )
+        )
+        max_inflight_frames = max(detector_concurrency)
+        pending_frames: deque[_PendingFrame] = deque()
+        frames_completed = 0
+        progress_interval = max(
+            1,
+            estimated_frames // sample_every_frames // 20,
+        )
+        allowed_classes = {
+            binding.entry.id: {
+                value.value
+                for value in binding.entry.supported_classes
+            }
+            for binding in bindings
+        }
+
+        def consume_frame(pending: _PendingFrame) -> None:
+            nonlocal frames_completed
+            detector_results = tuple(
+                future.result()
+                for future in pending.futures
+            )
+            frame_observations: list[_ObservedDetection] = []
+            for binding, proposals, inference_ms in detector_results:
+                inference_totals[binding.entry.id] += inference_ms
+                for proposal in proposals:
+                    if (
+                        proposal.class_name
+                        not in allowed_classes[binding.entry.id]
+                    ):
+                        raise ProcessingValidationError(
+                            f"{binding.entry.id}: detector returned an unsupported class"
+                        )
+                    if proposal.confidence < binding.entry.thresholds.confidence:
+                        continue
+                    frame_observations.append(
+                        _ObservedDetection(
+                            proposal=proposal,
+                            registry_id=binding.entry.id,
+                            inference_ms=inference_ms,
+                            proposal_source=(
+                                ProposalSource.MOCK
+                                if binding.entry.adapter
+                                is AdapterKind.DETERMINISTIC_MOCK
+                                else ProposalSource.MODEL
+                            ),
+                        )
+                    )
+
+            kept: set[int] = set()
+            for class_name in sorted(
+                {
+                    item.proposal.class_name
+                    for item in frame_observations
+                }
+            ):
+                kept.update(
+                    id(proposal)
+                    for proposal in class_aware_nms(
+                        (
+                            item.proposal
+                            for item in frame_observations
+                            if item.proposal.class_name == class_name
+                        ),
+                        iou_threshold=nms_thresholds[class_name],
+                    )
+                )
+            observations.extend(
+                _ObservedDetection(
+                    proposal=item.proposal,
+                    registry_id=item.registry_id,
+                    inference_ms=item.inference_ms,
+                    proposal_source=item.proposal_source,
+                    nms_suppressed=id(item.proposal) not in kept,
+                )
+                for item in frame_observations
+            )
+            tracking_proposals.extend(
+                item.proposal
+                for item in frame_observations
+                if id(item.proposal) in kept
+            )
+            frames_completed += 1
+            if frames_completed % progress_interval == 0:
+                progress = min(
+                    0.72,
+                    0.05
+                    + 0.67
+                    * (pending.frame_index + 1)
+                    / estimated_frames,
+                )
+                context.update(progress, "running detectors")
+
         try:
-            while True:
-                success, raw_frame = capture.read()
-                if not success:
-                    break
+            while capture.grab():
                 frame_index = frames_decoded
                 frames_decoded += 1
                 is_tail_frame = frame_index >= max(
@@ -436,77 +602,50 @@ class ProcessingService:
                 if frame_index % sample_every_frames != 0 and not is_tail_frame:
                     continue
 
+                success, raw_frame = capture.retrieve()
+                if not success:
+                    break
                 frames_sampled += 1
                 timestamp_ms = round(frame_index * 1000 / fps)
                 detection_context = DetectionContext(
                     frame_index=frame_index,
                     timestamp_ms=timestamp_ms,
                 )
-                frame_observations: list[_ObservedDetection] = []
-                for binding in bindings:
-                    inference_started = perf_counter()
-                    proposals = binding.detector.detect(
-                        cast(Frame, raw_frame),
-                        detection_context,
+                frame = cast(Frame, raw_frame)
+                pending_frames.append(
+                    _PendingFrame(
+                        frame_index=frame_index,
+                        futures=tuple(
+                            detector_pool.submit(
+                                _run_detector,
+                                binding,
+                                frame,
+                                detection_context,
+                            )
+                            for binding, detector_pool in zip(
+                                bindings,
+                                detector_pools,
+                                strict=True,
+                            )
+                        ),
                     )
-                    inference_ms = (perf_counter() - inference_started) * 1000
-                    inference_totals[binding.entry.id] += inference_ms
-                    allowed_classes = {value.value for value in binding.entry.supported_classes}
-                    for proposal in proposals:
-                        if proposal.class_name not in allowed_classes:
-                            raise ProcessingValidationError(
-                                f"{binding.entry.id}: detector returned an unsupported class"
-                            )
-                        if proposal.confidence < binding.entry.thresholds.confidence:
-                            continue
-                        frame_observations.append(
-                            _ObservedDetection(
-                                proposal=proposal,
-                                registry_id=binding.entry.id,
-                                inference_ms=inference_ms,
-                                proposal_source=(
-                                    ProposalSource.MOCK
-                                    if binding.entry.adapter
-                                    is AdapterKind.DETERMINISTIC_MOCK
-                                    else ProposalSource.MODEL
-                                ),
-                            )
-                        )
+                )
+                if len(pending_frames) >= max_inflight_frames:
+                    consume_frame(pending_frames[0])
+                    pending_frames.popleft()
 
-                kept: set[int] = set()
-                for class_name in sorted(
-                    {item.proposal.class_name for item in frame_observations}
-                ):
-                    kept.update(
-                        id(proposal)
-                        for proposal in class_aware_nms(
-                            (
-                                item.proposal
-                                for item in frame_observations
-                                if item.proposal.class_name == class_name
-                            ),
-                            iou_threshold=nms_thresholds[class_name],
-                        )
-                    )
-                observations.extend(
-                    _ObservedDetection(
-                        proposal=item.proposal,
-                        registry_id=item.registry_id,
-                        inference_ms=item.inference_ms,
-                        proposal_source=item.proposal_source,
-                        nms_suppressed=id(item.proposal) not in kept,
-                    )
-                    for item in frame_observations
-                )
-                tracking_proposals.extend(
-                    item.proposal
-                    for item in frame_observations
-                    if id(item.proposal) in kept
-                )
-                if frames_sampled % max(1, estimated_frames // sample_every_frames // 20) == 0:
-                    progress = min(0.72, 0.05 + 0.67 * frames_decoded / estimated_frames)
-                    context.update(progress, "running detectors")
+            while pending_frames:
+                consume_frame(pending_frames[0])
+                pending_frames.popleft()
         finally:
+            for pending in pending_frames:
+                for future in pending.futures:
+                    future.cancel()
+            for detector_pool in detector_pools:
+                detector_pool.shutdown(
+                    wait=True,
+                    cancel_futures=True,
+                )
             capture.release()
 
         if frames_decoded == 0:
@@ -515,7 +654,7 @@ class ProcessingService:
         context.update(0.76, "linking detections")
         tracker = IoUTracker(
             iou_threshold=0.3,
-            max_gap=max(2, sample_every_frames * 2),
+            max_gap=max(sample_every_frames * 3, round(fps)),
             materialize_interpolated=False,
         )
         tracks = tracker.track(tracking_proposals)
@@ -531,6 +670,15 @@ class ProcessingService:
             "frames_decoded": frames_decoded,
             "frames_sampled": frames_sampled,
             "sample_every_frames": sample_every_frames,
+            "max_inflight_frames": max_inflight_frames,
+            "detector_concurrency": {
+                binding.entry.id: max_workers
+                for binding, max_workers in zip(
+                    bindings,
+                    detector_concurrency,
+                    strict=True,
+                )
+            },
             "fps": round(fps, 6),
             "detections": len(observations),
             "tracker_detections": len(tracking_proposals),

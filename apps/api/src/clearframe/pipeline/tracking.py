@@ -1,8 +1,12 @@
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from math import exp, hypot, log
 
 from clearframe.domain.geometry import NormalizedBox
 from clearframe.pipeline.detection import DetectionProposal
+
+_MIN_BOX_SIZE = 0.000001
+_MAX_PREDICTED_SCALE = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +91,16 @@ class _TrackState:
     def last_point(self) -> TrackPoint:
         return self.points[-1]
 
+    @property
+    def observed_points(self) -> tuple[TrackPoint, ...]:
+        observed: list[TrackPoint] = []
+        for point in reversed(self.points):
+            if not point.is_interpolated:
+                observed.append(point)
+                if len(observed) == 2:
+                    break
+        return tuple(reversed(observed))
+
 
 def _detection_sort_key(
     detection: DetectionProposal,
@@ -103,9 +117,83 @@ def _detection_sort_key(
     )
 
 
+def _box_geometry(box: NormalizedBox) -> tuple[float, float, float, float]:
+    width = box.x2 - box.x1
+    height = box.y2 - box.y1
+    return (
+        (box.x1 + box.x2) / 2,
+        (box.y1 + box.y2) / 2,
+        width,
+        height,
+    )
+
+
+def _box_from_geometry(
+    center_x: float,
+    center_y: float,
+    width: float,
+    height: float,
+) -> NormalizedBox:
+    width = min(1.0, max(_MIN_BOX_SIZE, width))
+    height = min(1.0, max(_MIN_BOX_SIZE, height))
+    center_x = min(1.0 - width / 2, max(width / 2, center_x))
+    center_y = min(1.0 - height / 2, max(height / 2, center_y))
+    return NormalizedBox(
+        x1=center_x - width / 2,
+        y1=center_y - height / 2,
+        x2=center_x + width / 2,
+        y2=center_y + height / 2,
+    )
+
+
+def _predict_box(state: _TrackState, frame_index: int) -> NormalizedBox:
+    observed = state.observed_points
+    latest = observed[-1]
+    if len(observed) < 2:
+        return latest.bbox
+
+    previous = observed[-2]
+    history_frames = latest.frame_index - previous.frame_index
+    prediction_frames = frame_index - latest.frame_index
+    if history_frames <= 0 or prediction_frames <= 0:
+        return latest.bbox
+
+    previous_x, previous_y, previous_width, previous_height = _box_geometry(
+        previous.bbox
+    )
+    latest_x, latest_y, latest_width, latest_height = _box_geometry(latest.bbox)
+    horizon = prediction_frames / history_frames
+    scale_limit = log(_MAX_PREDICTED_SCALE)
+    width_change = max(
+        -scale_limit,
+        min(scale_limit, log(latest_width / previous_width) * horizon),
+    )
+    height_change = max(
+        -scale_limit,
+        min(scale_limit, log(latest_height / previous_height) * horizon),
+    )
+    return _box_from_geometry(
+        latest_x + (latest_x - previous_x) * horizon,
+        latest_y + (latest_y - previous_y) * horizon,
+        latest_width * exp(width_change),
+        latest_height * exp(height_change),
+    )
+
+
+def _scale_ratio(first: NormalizedBox, second: NormalizedBox) -> float:
+    _, _, first_width, first_height = _box_geometry(first)
+    _, _, second_width, second_height = _box_geometry(second)
+    return max(
+        first_width / second_width,
+        second_width / first_width,
+        first_height / second_height,
+        second_height / first_height,
+    )
+
+
 class IoUTracker:
-    name = "deterministic_iou"
-    version = "1.1"
+    name = "deterministic_motion_iou"
+    version = "2.0"
 
     def __init__(
         self,
@@ -113,19 +201,37 @@ class IoUTracker:
         iou_threshold: float = 0.3,
         max_gap: int = 2,
         materialize_interpolated: bool = True,
+        motion_center_scale: float = 1.5,
+        motion_center_floor: float = 0.01,
+        motion_center_ceiling: float = 0.18,
+        motion_max_scale_ratio: float = 2.25,
     ) -> None:
         if not 0.0 < iou_threshold <= 1.0:
             raise ValueError("iou_threshold must be greater than zero and at most one")
         if max_gap < 0:
             raise ValueError("max_gap cannot be negative")
+        if motion_center_scale <= 0:
+            raise ValueError("motion_center_scale must be positive")
+        if not 0.0 <= motion_center_floor <= motion_center_ceiling:
+            raise ValueError("motion center limits are invalid")
+        if motion_center_ceiling > 1.0:
+            raise ValueError("motion_center_ceiling cannot exceed one")
+        if motion_max_scale_ratio <= 1.0:
+            raise ValueError("motion_max_scale_ratio must be greater than one")
         self.iou_threshold = iou_threshold
         self.max_gap = max_gap
         self.materialize_interpolated = materialize_interpolated
+        self.motion_center_scale = motion_center_scale
+        self.motion_center_floor = motion_center_floor
+        self.motion_center_ceiling = motion_center_ceiling
+        self.motion_max_scale_ratio = motion_max_scale_ratio
         self.reset()
 
     def reset(self) -> None:
         self._states: list[_TrackState] = []
+        self._active_states: dict[str, _TrackState] = {}
         self._warnings: list[ContinuityWarning] = []
+        self._warnings_by_track: dict[str, list[ContinuityWarning]] = {}
         self._next_track_number = 1
         self._last_frame_index: int | None = None
 
@@ -160,26 +266,33 @@ class IoUTracker:
         if any(detection.frame_index != frame_index for detection in ordered):
             raise ValueError("all detections must belong to frame_index")
 
-        for state in self._states:
+        for state in tuple(self._active_states.values()):
             if (
-                state.active
-                and frame_index - state.last_point.frame_index - 1 > self.max_gap
+                frame_index - state.last_point.frame_index - 1 > self.max_gap
             ):
                 state.active = False
+                self._active_states.pop(state.track_id)
 
-        candidates: list[tuple[float, str, int, _TrackState]] = []
+        candidates: list[
+            tuple[int, float, float, float, float, str, int, _TrackState]
+        ] = []
         for detection_index, detection in enumerate(ordered):
-            for state in self._states:
-                if not state.active or state.class_name != detection.class_name:
+            for state in self._active_states.values():
+                if state.class_name != detection.class_name:
                     continue
-                overlap = state.last_point.bbox.iou(detection.bbox)
-                if overlap >= self.iou_threshold:
-                    candidates.append((-overlap, state.track_id, detection_index, state))
+                candidate = self._association_candidate(
+                    state,
+                    detection,
+                    detection_index=detection_index,
+                    frame_index=frame_index,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
 
         matched_tracks: set[str] = set()
         matched_detections: set[int] = set()
         assignments: list[tuple[_TrackState, int]] = []
-        for _, _, detection_index, state in sorted(candidates):
+        for *_, detection_index, state in sorted(candidates):
             if state.track_id in matched_tracks or detection_index in matched_detections:
                 continue
             matched_tracks.add(state.track_id)
@@ -217,7 +330,73 @@ class IoUTracker:
             ],
         )
         self._states.append(state)
+        self._active_states[state.track_id] = state
         return state
+
+    def _association_candidate(
+        self,
+        state: _TrackState,
+        detection: DetectionProposal,
+        *,
+        detection_index: int,
+        frame_index: int,
+    ) -> tuple[int, float, float, float, float, str, int, _TrackState] | None:
+        predicted = _predict_box(state, frame_index)
+        previous_overlap = state.last_point.bbox.iou(detection.bbox)
+        predicted_overlap = predicted.iou(detection.bbox)
+        best_overlap = max(previous_overlap, predicted_overlap)
+
+        predicted_x, predicted_y, predicted_width, predicted_height = _box_geometry(
+            predicted
+        )
+        detection_x, detection_y, detection_width, detection_height = _box_geometry(
+            detection.bbox
+        )
+        center_distance = hypot(
+            predicted_x - detection_x,
+            predicted_y - detection_y,
+        )
+        reference_diagonal = max(
+            hypot(predicted_width, predicted_height),
+            hypot(detection_width, detection_height),
+        )
+        center_gate = min(
+            self.motion_center_ceiling,
+            self.motion_center_floor + self.motion_center_scale * reference_diagonal,
+        )
+        scale_ratio = _scale_ratio(predicted, detection.bbox)
+        strong_overlap = best_overlap >= self.iou_threshold
+        if not strong_overlap and (
+            center_distance > center_gate
+            or scale_ratio > self.motion_max_scale_ratio
+        ):
+            return None
+
+        normalized_distance = center_distance / max(center_gate, _MIN_BOX_SIZE)
+        normalized_scale = min(
+            1.0,
+            log(scale_ratio) / log(self.motion_max_scale_ratio),
+        )
+        normalized_age = min(
+            1.0,
+            (frame_index - state.last_point.frame_index) / max(1, self.max_gap + 1),
+        )
+        cost = (
+            0.55 * (1.0 - best_overlap)
+            + 0.30 * normalized_distance
+            + 0.10 * normalized_scale
+            + 0.05 * normalized_age
+        )
+        return (
+            0 if strong_overlap else 1,
+            cost,
+            -best_overlap,
+            normalized_distance,
+            scale_ratio,
+            state.track_id,
+            detection_index,
+            state,
+        )
 
     def _append_detection(
         self,
@@ -272,7 +451,7 @@ class IoUTracker:
         missing_start = previous.last_point.frame_index + 1
         missing_end = point.frame_index - 1
         self._warnings.append(
-            ContinuityWarning(
+            warning := ContinuityWarning(
                 code="possible_fragment",
                 class_name=new_state.class_name,
                 start_frame=missing_start,
@@ -284,16 +463,15 @@ class IoUTracker:
                 ),
             )
         )
+        for track_id in warning.track_ids:
+            self._warnings_by_track.setdefault(track_id, []).append(warning)
 
     def _snapshot(self, state: _TrackState) -> DetectionTrack:
-        warnings = tuple(
-            warning for warning in self._warnings if state.track_id in warning.track_ids
-        )
         return DetectionTrack(
             track_id=state.track_id,
             class_name=state.class_name,
             points=tuple(state.points),
-            warnings=warnings,
+            warnings=tuple(self._warnings_by_track.get(state.track_id, ())),
             interpolates_gaps=not self.materialize_interpolated,
         )
 

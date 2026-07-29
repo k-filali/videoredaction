@@ -25,7 +25,7 @@ models:
 
   - id: yunet-face
     display_name: OpenCV YuNet face detector
-    adapter: opencv_yunet
+    adapter: onnxruntime_yunet
     model_version: "2023mar-3cc26e7f"
     adapter_version: "1.0.0"
     enabled: true

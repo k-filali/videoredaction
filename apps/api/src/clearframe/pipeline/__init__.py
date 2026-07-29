@@ -19,6 +19,7 @@ from clearframe.pipeline.tracking import (
 from clearframe.pipeline.yolov8 import OpenCVYoloV8PlateDetector
 from clearframe.pipeline.yolov9 import OnnxRuntimeYoloV9PlateDetector
 from clearframe.pipeline.yunet import OpenCVYuNetFaceDetector
+from clearframe.pipeline.yunet_onnx import OnnxRuntimeYuNetFaceDetector
 
 __all__ = [
     "ContinuityWarning",
@@ -31,6 +32,7 @@ __all__ = [
     "IoUTracker",
     "MockPlateDetector",
     "OnnxRuntimeYoloV9PlateDetector",
+    "OnnxRuntimeYuNetFaceDetector",
     "OpenCVFaceCascadeDetector",
     "OpenCVPlateCascadeDetector",
     "OpenCVYoloV8PlateDetector",

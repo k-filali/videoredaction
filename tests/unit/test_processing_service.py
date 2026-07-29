@@ -1,5 +1,8 @@
+from collections.abc import Iterable
 from itertools import pairwise
 from pathlib import Path
+from threading import Lock
+from time import sleep
 
 import pytest
 from sqlalchemy import func, select
@@ -18,7 +21,8 @@ from clearframe.pipeline import (
     Detector,
     DetectorAvailability,
     OnnxRuntimeYoloV9PlateDetector,
-    OpenCVYuNetFaceDetector,
+    OnnxRuntimeYuNetFaceDetector,
+    class_aware_nms,
 )
 from clearframe.pipeline.detection import Frame
 from clearframe.rendering import box_at_frame
@@ -161,8 +165,166 @@ def test_default_processing_loads_real_model_adapters(tmp_path: Path) -> None:
             "yunet-face",
         ]
         assert isinstance(bindings[0].detector, OnnxRuntimeYoloV9PlateDetector)
-        assert isinstance(bindings[1].detector, OpenCVYuNetFaceDetector)
+        assert isinstance(bindings[1].detector, OnnxRuntimeYuNetFaceDetector)
         assert all(binding.detector.availability.available for binding in bindings)
+    finally:
+        runner.shutdown()
+
+
+class _ConcurrentDetector:
+    name = "concurrent_test"
+    version = "1.0"
+    supported_classes = frozenset({"license_plate"})
+    device = "cuda"
+    max_concurrency = 4
+
+    def __init__(self, *, fail_frame: int | None = None) -> None:
+        self.fail_frame = fail_frame
+        self.active_calls = 0
+        self.maximum_active_calls = 0
+        self.started_frames: list[int] = []
+        self.completed_frames: list[int] = []
+        self.guard = Lock()
+
+    @property
+    def availability(self) -> DetectorAvailability:
+        return DetectorAvailability(available=True)
+
+    def detect(
+        self,
+        frame: Frame,
+        context: DetectionContext,
+    ) -> list[DetectionProposal]:
+        del frame
+        with self.guard:
+            self.active_calls += 1
+            self.maximum_active_calls = max(
+                self.maximum_active_calls,
+                self.active_calls,
+            )
+            self.started_frames.append(context.frame_index)
+        try:
+            sleep(0.01 * (4 - context.frame_index % 4))
+            if context.frame_index == self.fail_frame:
+                raise RuntimeError("controlled detector failure")
+            return [
+                DetectionProposal(
+                    frame_index=context.frame_index,
+                    timestamp_ms=context.timestamp_ms,
+                    class_name="license_plate",
+                    bbox=NormalizedBox(
+                        x1=0.2,
+                        y1=0.6,
+                        x2=0.5,
+                        y2=0.75,
+                    ),
+                    confidence=0.99,
+                    detector_name=self.name,
+                    detector_version=self.version,
+                )
+            ]
+        finally:
+            with self.guard:
+                self.active_calls -= 1
+                self.completed_frames.append(context.frame_index)
+
+
+class _ConcurrentProcessingService(ProcessingService):
+    def __init__(
+        self,
+        database: Database,
+        storage: LocalStorage,
+        runner: LocalJobRunner,
+        detector: _ConcurrentDetector,
+    ) -> None:
+        super().__init__(
+            database,
+            storage,
+            runner,
+            registry_path=MOCK_MODEL_REGISTRY_PATH,
+        )
+        self.detector = detector
+
+    def _build_detector(self, entry: ModelEntry) -> Detector:
+        del entry
+        return self.detector
+
+
+def test_processing_bounds_frames_and_consumes_results_in_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database, storage, runner, _, video_id = _build_processing(tmp_path)
+    detector = _ConcurrentDetector()
+    service = _ConcurrentProcessingService(
+        database,
+        storage,
+        runner,
+        detector,
+    )
+    consumed_frames: list[int] = []
+    def recording_nms(
+        proposals: Iterable[DetectionProposal],
+        *,
+        iou_threshold: float = 0.5,
+    ) -> list[DetectionProposal]:
+        materialized = list(proposals)
+        consumed_frames.extend(
+            proposal.frame_index
+            for proposal in materialized
+        )
+        return class_aware_nms(
+            materialized,
+            iou_threshold=iou_threshold,
+        )
+
+    monkeypatch.setattr(
+        "clearframe.services.processing.class_aware_nms",
+        recording_nms,
+    )
+    try:
+        requested = service.request(video_id, sample_every_frames=1)
+        runner.wait(requested.job.id, timeout=60)
+
+        with database.session() as session:
+            run = session.get(ModelRun, requested.run.id)
+            assert run is not None
+            assert run.status == RunStatus.COMPLETED
+            assert consumed_frames == sorted(consumed_frames)
+            assert len(consumed_frames) == run.metrics["frames_sampled"]
+            assert run.metrics["max_inflight_frames"] == 4
+            assert run.metrics["detector_concurrency"] == {
+                "mock-plate-v1": 4
+            }
+        assert detector.maximum_active_calls == 4
+        assert detector.completed_frames != sorted(detector.completed_frames)
+        assert detector.active_calls == 0
+    finally:
+        runner.shutdown()
+
+
+def test_processing_drains_detector_workers_after_failure(tmp_path: Path) -> None:
+    database, storage, runner, _, video_id = _build_processing(tmp_path)
+    detector = _ConcurrentDetector(fail_frame=2)
+    service = _ConcurrentProcessingService(
+        database,
+        storage,
+        runner,
+        detector,
+    )
+    try:
+        requested = service.request(video_id, sample_every_frames=1)
+        runner.wait(requested.job.id, timeout=60)
+
+        with database.session() as session:
+            run = session.get(ModelRun, requested.run.id)
+            video = session.get(VideoAsset, video_id)
+            assert run is not None
+            assert video is not None
+            assert run.status == RunStatus.FAILED
+            assert video.status == VideoStatus.FAILED
+        assert detector.active_calls == 0
+        assert detector.maximum_active_calls <= detector.max_concurrency
     finally:
         runner.shutdown()
 

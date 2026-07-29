@@ -30,6 +30,7 @@ class AdapterKind(StrEnum):
     OPENCV_CASCADE = "opencv_cascade"
     OPENCV_YUNET = "opencv_yunet"
     OPENCV_YOLOV8 = "opencv_yolov8"
+    ONNXRUNTIME_YUNET = "onnxruntime_yunet"
     ONNXRUNTIME_YOLOV9 = "onnxruntime_yolov9"
     ONNX = "onnx"
 

@@ -15,13 +15,16 @@ def detection(
     class_name: str = "license_plate",
     *,
     x: float = 0.1,
+    y: float = 0.2,
+    width: float = 0.2,
+    height: float = 0.2,
     confidence: float = 0.9,
 ) -> DetectionProposal:
     return DetectionProposal(
         frame_index=frame_index,
         timestamp_ms=frame_index * 100,
         class_name=class_name,
-        bbox=NormalizedBox(x1=x, y1=0.2, x2=x + 0.2, y2=0.4),
+        bbox=NormalizedBox(x1=x, y1=y, x2=x + width, y2=y + height),
         confidence=confidence,
         detector_name="test",
         detector_version="1",
@@ -48,6 +51,79 @@ def test_tracker_never_associates_across_classes() -> None:
 
     assert len(tracks) == 2
     assert [track.class_name for track in tracks] == ["license_plate", "face"]
+
+
+def test_tracker_uses_constant_velocity_for_non_overlapping_motion() -> None:
+    tracks = IoUTracker(iou_threshold=0.3, max_gap=5).track(
+        [
+            detection(0, x=0.10),
+            detection(1, x=0.25),
+            detection(2, x=0.40),
+        ]
+    )
+
+    assert len(tracks) == 1
+    assert [point.bbox.x1 for point in tracks[0].points] == pytest.approx(
+        [0.10, 0.25, 0.40]
+    )
+
+
+def test_tracker_reconnects_after_sampled_occlusion() -> None:
+    track = IoUTracker(
+        iou_threshold=0.3,
+        max_gap=30,
+        materialize_interpolated=False,
+    ).track(
+        [
+            detection(0, x=0.10),
+            detection(5, x=0.15),
+            detection(20, x=0.30),
+        ]
+    )[0]
+
+    assert [point.frame_index for point in track.points] == [0, 5, 20]
+    assert track.coverage_point_count == 21
+
+
+def test_motion_gate_rejects_implausible_jump_and_scale_change() -> None:
+    jump_tracks = IoUTracker(iou_threshold=0.3, max_gap=30).track(
+        [
+            detection(0, x=0.05),
+            detection(5, x=0.75),
+        ]
+    )
+    scale_tracks = IoUTracker(iou_threshold=0.3, max_gap=30).track(
+        [
+            detection(0, x=0.40, y=0.40, width=0.04, height=0.04),
+            detection(5, x=0.32, y=0.32, width=0.20, height=0.20),
+        ]
+    )
+
+    assert len(jump_tracks) == 2
+    assert len(scale_tracks) == 2
+
+
+def test_motion_association_is_deterministic_with_multiple_tracks() -> None:
+    proposals = [
+        detection(0, x=0.10, confidence=0.90),
+        detection(0, x=0.70, confidence=0.80),
+        detection(1, x=0.25, confidence=0.90),
+        detection(1, x=0.60, confidence=0.80),
+        detection(2, x=0.40, confidence=0.90),
+        detection(2, x=0.50, confidence=0.80),
+    ]
+
+    first = IoUTracker(iou_threshold=0.3, max_gap=5).track(proposals)
+    second = IoUTracker(iou_threshold=0.3, max_gap=5).track(reversed(proposals))
+
+    assert first == second
+    assert len(first) == 2
+    assert [point.bbox.x1 for point in first[0].points] == pytest.approx(
+        [0.10, 0.25, 0.40]
+    )
+    assert [point.bbox.x1 for point in first[1].points] == pytest.approx(
+        [0.70, 0.60, 0.50]
+    )
 
 
 def test_interpolated_boxes_remain_normalized() -> None:

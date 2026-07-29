@@ -26,8 +26,14 @@ class _StubNodeArgument:
 
 
 class _StubSession:
-    def __init__(self, output: object) -> None:
+    def __init__(
+        self,
+        output: object,
+        *,
+        providers: Sequence[str] = ("CPUExecutionProvider",),
+    ) -> None:
         self.output = output
+        self.providers = providers
         self.input_spec = _StubNodeArgument(
             name="images",
             shape=(1, 3, 384, 384),
@@ -47,6 +53,9 @@ class _StubSession:
 
     def get_outputs(self) -> Sequence[_StubNodeArgument]:
         return [self.output_spec]
+
+    def get_providers(self) -> Sequence[str]:
+        return self.providers
 
     def run(
         self,
@@ -93,6 +102,7 @@ def test_yolov9_preprocesses_decodes_filters_and_sorts(tmp_path: Path) -> None:
         confidence_threshold=0.5,
         min_plate_size_pixels=8,
         _factory=factory,
+        _available_providers=lambda: ("CPUExecutionProvider",),
     )
     context = DetectionContext(frame_index=15, timestamp_ms=600)
     frame = np.full((200, 400, 3), (10, 20, 30), dtype=np.uint8)
@@ -128,6 +138,88 @@ def test_yolov9_preprocesses_decodes_filters_and_sorts(tmp_path: Path) -> None:
     assert all(proposal.class_name == "license_plate" for proposal in proposals)
     assert all(proposal.frame_index == 15 for proposal in proposals)
     assert all(proposal.timestamp_ms == 600 for proposal in proposals)
+    assert detector.provider == "CPUExecutionProvider"
+    assert detector.device == "cpu"
+
+
+def test_yolov9_prefers_cuda_and_reports_runtime_fallback(tmp_path: Path) -> None:
+    output = np.empty((0, 7), dtype=np.float32)
+    requested: list[tuple[str, ...]] = []
+
+    def cuda_factory(
+        _path: str,
+        providers: tuple[str, ...],
+    ) -> _StubSession:
+        requested.append(providers)
+        return _StubSession(
+            output,
+            providers=("CUDAExecutionProvider", "CPUExecutionProvider"),
+        )
+
+    cuda_detector = OnnxRuntimeYoloV9PlateDetector(
+        _model_file(tmp_path),
+        _factory=cuda_factory,
+        _available_providers=lambda: (
+            "AzureExecutionProvider",
+            "CPUExecutionProvider",
+            "CUDAExecutionProvider",
+        ),
+    )
+    fallback_detector = OnnxRuntimeYoloV9PlateDetector(
+        _model_file(tmp_path),
+        _factory=lambda _path, _providers: _StubSession(output),
+        _available_providers=lambda: (
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ),
+    )
+    fallback_requests: list[tuple[str, ...]] = []
+
+    def failing_cuda_factory(
+        _path: str,
+        providers: tuple[str, ...],
+    ) -> _StubSession:
+        fallback_requests.append(providers)
+        if providers[0] == "CUDAExecutionProvider":
+            raise RuntimeError("CUDA runtime unavailable")
+        return _StubSession(output)
+
+    retry_detector = OnnxRuntimeYoloV9PlateDetector(
+        _model_file(tmp_path),
+        _factory=failing_cuda_factory,
+        _available_providers=lambda: (
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ),
+    )
+
+    assert requested == [
+        ("CUDAExecutionProvider", "CPUExecutionProvider")
+    ]
+    assert cuda_detector.provider == "CUDAExecutionProvider"
+    assert cuda_detector.device == "cuda"
+    assert fallback_detector.provider == "CPUExecutionProvider"
+    assert fallback_detector.device == "cpu"
+    assert fallback_requests == [
+        ("CUDAExecutionProvider", "CPUExecutionProvider"),
+        ("CPUExecutionProvider",),
+    ]
+    assert retry_detector.availability.available
+    assert retry_detector.provider == "CPUExecutionProvider"
+    assert retry_detector.device == "cpu"
+
+
+def test_yolov9_reports_unavailable_supported_provider(tmp_path: Path) -> None:
+    detector = OnnxRuntimeYoloV9PlateDetector(
+        _model_file(tmp_path),
+        _available_providers=lambda: ("AzureExecutionProvider",),
+    )
+
+    assert not detector.availability.available
+    assert detector.provider is None
+    assert detector.device is None
+    assert detector.availability.reason is not None
+    assert "no supported CUDA or CPU" in detector.availability.reason
 
 
 def test_yolov9_reports_unavailable_model_paths(tmp_path: Path) -> None:
@@ -215,8 +307,15 @@ def test_yolov9_rejects_malformed_runtime_output(
 
 
 class _ConcurrentSession(_StubSession):
-    def __init__(self) -> None:
-        super().__init__(np.empty((0, 7), dtype=np.float32))
+    def __init__(
+        self,
+        *,
+        providers: Sequence[str] = ("CPUExecutionProvider",),
+    ) -> None:
+        super().__init__(
+            np.empty((0, 7), dtype=np.float32),
+            providers=providers,
+        )
         self.active_calls = 0
         self.maximum_active_calls = 0
         self.guard = Lock()
@@ -257,3 +356,32 @@ def test_yolov9_serializes_session_inference(tmp_path: Path) -> None:
 
     assert results == [[]] * 8
     assert session.maximum_active_calls == 1
+    assert detector.max_concurrency == 1
+
+
+def test_yolov9_serializes_cuda_session_inference(tmp_path: Path) -> None:
+    session = _ConcurrentSession(
+        providers=("CUDAExecutionProvider", "CPUExecutionProvider"),
+    )
+    detector = OnnxRuntimeYoloV9PlateDetector(
+        _model_file(tmp_path),
+        _factory=lambda _path, _providers: session,
+        _available_providers=lambda: (
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ),
+    )
+    frame = np.zeros((100, 200), dtype=np.uint8)
+    context = DetectionContext(frame_index=0, timestamp_ms=0)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(
+            executor.map(
+                lambda _index: detector.detect(frame, context),
+                range(12),
+            )
+        )
+
+    assert results == [[]] * 12
+    assert session.maximum_active_calls == 1
+    assert detector.max_concurrency == 1

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Protocol, cast
+from typing import cast
 
 import cv2
 import numpy as np
-import onnxruntime as ort  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from clearframe.domain.geometry import NormalizedBox
@@ -19,49 +17,24 @@ from clearframe.pipeline.detection import (
     DetectorUnavailableError,
     Frame,
 )
+from clearframe.pipeline.onnx_runtime import (
+    ONNX_RUNTIME_VERSION,
+    OnnxSession,
+    ProviderDiscovery,
+    SessionFactory,
+    active_execution_provider,
+    create_onnx_session,
+    create_session_with_cpu_fallback,
+    discover_execution_providers,
+    provider_device,
+    select_execution_providers,
+)
 
 _INPUT_HEIGHT = 384
 _INPUT_WIDTH = 384
 _INPUT_SHAPE = (1, 3, _INPUT_HEIGHT, _INPUT_WIDTH)
 _LETTERBOX_COLOR = (114, 114, 114)
 _PLATE_CLASS_ID = 0
-_CPU_PROVIDERS = ("CPUExecutionProvider",)
-
-
-class _NodeArgument(Protocol):
-    @property
-    def name(self) -> str: ...
-
-    @property
-    def shape(self) -> Sequence[int | str | None]: ...
-
-    @property
-    def type(self) -> str: ...
-
-
-class _InferenceSession(Protocol):
-    def get_inputs(self) -> Sequence[_NodeArgument]: ...
-
-    def get_outputs(self) -> Sequence[_NodeArgument]: ...
-
-    def run(
-        self,
-        output_names: Sequence[str] | None,
-        input_feed: Mapping[str, NDArray[np.float32]],
-    ) -> Sequence[object]: ...
-
-
-_SessionFactory = Callable[[str, tuple[str, ...]], _InferenceSession]
-
-
-def _create_session(
-    model_path: str,
-    providers: tuple[str, ...],
-) -> _InferenceSession:
-    return cast(
-        _InferenceSession,
-        ort.InferenceSession(model_path, providers=list(providers)),
-    )
 
 
 def _as_bgr(frame: Frame) -> Frame:
@@ -126,7 +99,7 @@ def _input_tensor(image: Frame) -> NDArray[np.float32]:
     ) / np.float32(255.0)
 
 
-def _validate_session(session: _InferenceSession) -> str:
+def _validate_session(session: OnnxSession) -> str:
     inputs = tuple(session.get_inputs())
     if len(inputs) != 1:
         raise RuntimeError("YOLOv9 model must expose exactly one input")
@@ -171,7 +144,7 @@ class OnnxRuntimeYoloV9PlateDetector:
     """ONNX Runtime adapter for an end-to-end YOLOv9 plate detector."""
 
     name = "onnxruntime_yolov9_plate"
-    version = ort.__version__
+    version = ONNX_RUNTIME_VERSION
     supported_classes = frozenset({"license_plate"})
 
     def __init__(
@@ -180,7 +153,8 @@ class OnnxRuntimeYoloV9PlateDetector:
         *,
         confidence_threshold: float = 0.5,
         min_plate_size_pixels: int = 8,
-        _factory: _SessionFactory = _create_session,
+        _factory: SessionFactory = create_onnx_session,
+        _available_providers: ProviderDiscovery = discover_execution_providers,
     ) -> None:
         if not 0.0 <= confidence_threshold <= 1.0:
             raise ValueError("confidence_threshold must be between zero and one")
@@ -190,9 +164,12 @@ class OnnxRuntimeYoloV9PlateDetector:
         self._model_path = model_path.expanduser().resolve()
         self._confidence_threshold = confidence_threshold
         self._min_plate_size_pixels = min_plate_size_pixels
-        self._session: _InferenceSession | None = None
+        self._session: OnnxSession | None = None
         self._input_name: str | None = None
-        self._lock = Lock()
+        self._provider: str | None = None
+        self._device: str | None = None
+        self._max_concurrency = 1
+        self._inference_gate = Lock()
 
         if self._model_path.suffix.lower() != ".onnx":
             self._availability = DetectorAvailability(
@@ -214,8 +191,16 @@ class OnnxRuntimeYoloV9PlateDetector:
             return
 
         try:
-            session = _factory(str(self._model_path), _CPU_PROVIDERS)
+            requested_providers = select_execution_providers(
+                _available_providers()
+            )
+            session, requested_providers = create_session_with_cpu_fallback(
+                str(self._model_path),
+                requested_providers,
+                _factory,
+            )
             input_name = _validate_session(session)
+            provider = active_execution_provider(session, requested_providers)
         except Exception as exc:
             self._availability = DetectorAvailability(
                 False,
@@ -225,11 +210,25 @@ class OnnxRuntimeYoloV9PlateDetector:
 
         self._session = session
         self._input_name = input_name
+        self._provider = provider
+        self._device = provider_device(provider)
         self._availability = DetectorAvailability(True)
 
     @property
     def availability(self) -> DetectorAvailability:
         return self._availability
+
+    @property
+    def provider(self) -> str | None:
+        return self._provider
+
+    @property
+    def device(self) -> str | None:
+        return self._device
+
+    @property
+    def max_concurrency(self) -> int:
+        return self._max_concurrency
 
     def detect(self, frame: Frame, context: DetectionContext) -> list[DetectionProposal]:
         if self._session is None or self._input_name is None:
@@ -239,7 +238,7 @@ class OnnxRuntimeYoloV9PlateDetector:
         height, width = image.shape[:2]
         letterbox = _letterbox(image)
         tensor = _input_tensor(letterbox.image)
-        with self._lock:
+        with self._inference_gate:
             outputs = self._session.run(None, {self._input_name: tensor})
         if len(outputs) != 1:
             raise RuntimeError("YOLOv9 returned an unexpected number of outputs")

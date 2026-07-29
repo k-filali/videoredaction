@@ -5,7 +5,13 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+    gpus:
+      - driver: nvidia
+        count: all
+        capabilities:
+          - gpu
     environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
       CLEARFRAME_ENV: local
       CLEARFRAME_API_HOST: 0.0.0.0
       CLEARFRAME_ACCESS_TOKEN: ${CLEARFRAME_ACCESS_TOKEN:?Set CLEARFRAME_ACCESS_TOKEN before starting ClearFrame}
