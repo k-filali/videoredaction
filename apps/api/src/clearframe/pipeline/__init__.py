@@ -16,6 +16,8 @@ from clearframe.pipeline.tracking import (
     TrackPoint,
     validate_continuity,
 )
+from clearframe.pipeline.yolov8 import OpenCVYoloV8PlateDetector
+from clearframe.pipeline.yunet import OpenCVYuNetFaceDetector
 
 __all__ = [
     "ContinuityWarning",
@@ -29,6 +31,8 @@ __all__ = [
     "MockPlateDetector",
     "OpenCVFaceCascadeDetector",
     "OpenCVPlateCascadeDetector",
+    "OpenCVYoloV8PlateDetector",
+    "OpenCVYuNetFaceDetector",
     "TrackPoint",
     "class_aware_nms",
     "validate_continuity",
