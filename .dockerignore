@@ -38,6 +38,8 @@ credentials.*
 *.pfx
 *.kdbx
 *.onnx
+!configs/models/weights
+!configs/models/weights/*.onnx
 *.pt
 *.pth
 *.ckpt

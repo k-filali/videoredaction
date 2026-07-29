@@ -48,6 +48,7 @@ models/weights/
 ml/data/
 ml/artifacts/
 *.onnx
+!configs/models/weights/*.onnx
 *.pt
 *.pth
 *.ckpt
