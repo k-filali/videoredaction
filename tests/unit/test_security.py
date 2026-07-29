@@ -21,6 +21,11 @@ def test_gcs_backend_requires_a_bucket() -> None:
         Settings(storage_backend="gcs", gcs_bucket=None)
 
 
+def test_cloud_job_backend_requires_a_project() -> None:
+    with pytest.raises(ValidationError, match="Google Cloud project"):
+        Settings(job_backend="cloud_run", gcp_project_id=None)
+
+
 def test_access_token_protects_sensitive_api(tmp_path: Path) -> None:
     database = Database(f"sqlite:///{(tmp_path / 'secured.db').as_posix()}")
     settings = Settings(

@@ -37,6 +37,14 @@ class JobDispatcher(Protocol):
     def enqueue(self, job_id: str) -> None: ...
 
 
+class ManagedJobDispatcher(JobDispatcher, Protocol):
+    def recover_interrupted_jobs(self) -> None: ...
+
+    def wait(self, job_id: str, timeout: float = 30.0) -> None: ...
+
+    def shutdown(self) -> None: ...
+
+
 JobHandler = Callable[[JobContext, str], None]
 
 

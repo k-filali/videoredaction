@@ -35,8 +35,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         and app.state.database.engine.url.drivername == "sqlite"
     ):
         app.state.database.create_schema()
-    app.state.services.runner.recover_interrupted_jobs()
-    app.state.services.proxy.reconcile_all()
+    if settings.job_backend == "local":
+        app.state.services.runner.recover_interrupted_jobs()
+        app.state.services.proxy.reconcile_all()
     try:
         yield
     finally:

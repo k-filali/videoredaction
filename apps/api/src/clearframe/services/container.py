@@ -1,11 +1,12 @@
 from dataclasses import dataclass
 from datetime import timedelta
 
+from clearframe.cloud_jobs import CloudRunJobDispatcher
 from clearframe.config import Settings
 from clearframe.database import Database
 from clearframe.domain.enums import JobType
 from clearframe.gcs_storage import GCSStorage
-from clearframe.jobs import JobExecutor, LocalJobRunner
+from clearframe.jobs import JobExecutor, LocalJobRunner, ManagedJobDispatcher
 from clearframe.media import MediaProcessor
 from clearframe.services.export import ExportService
 from clearframe.services.ingest import IngestService
@@ -21,7 +22,7 @@ class ServiceContainer:
     storage: ArtifactStorage
     media: MediaProcessor
     executor: JobExecutor
-    runner: LocalJobRunner
+    runner: ManagedJobDispatcher
     ingest: IngestService
     proxy: ProxyService
     processing: ProcessingService
@@ -52,7 +53,20 @@ class ServiceContainer:
             max_video_fps=settings.max_video_fps,
         )
         executor = JobExecutor(database)
-        runner = LocalJobRunner(database, job_executor=executor)
+        runner: ManagedJobDispatcher
+        if settings.job_backend == "cloud_run":
+            if settings.gcp_project_id is None:
+                raise ValueError("a Google Cloud project is required")
+            resource_prefix = (
+                f"projects/{settings.gcp_project_id}/locations/{settings.gcp_region}"
+            )
+            runner = CloudRunJobDispatcher(
+                database,
+                cpu_job=f"{resource_prefix}/jobs/{settings.cloud_run_cpu_job}",
+                gpu_job=f"{resource_prefix}/jobs/{settings.cloud_run_gpu_job}",
+            )
+        else:
+            runner = LocalJobRunner(database, job_executor=executor)
         ingest = IngestService(
             database=database,
             storage=storage,

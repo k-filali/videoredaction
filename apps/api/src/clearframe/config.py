@@ -19,6 +19,20 @@ class Settings(BaseSettings):
     web_origin: str = "http://localhost:5173"
     access_token: SecretStr | None = None
     database_url: str = "sqlite:///./data/clearframe.db"
+    job_backend: Literal["local", "cloud_run"] = "local"
+    gcp_project_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+    )
+    gcp_region: str = Field(default="us-central1", pattern=r"^[a-z]+-[a-z]+\d+$")
+    cloud_run_cpu_job: str = Field(
+        default="clearframe-cpu-worker",
+        pattern=r"^[a-z][a-z0-9-]{0,62}$",
+    )
+    cloud_run_gpu_job: str = Field(
+        default="clearframe-gpu-worker",
+        pattern=r"^[a-z][a-z0-9-]{0,62}$",
+    )
     storage_backend: Literal["local", "gcs"] = "local"
     storage_root: Path = Path("./storage")
     storage_scratch_root: Path = Path("./storage/tmp/cloud")
@@ -39,6 +53,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "access_token",
+        "gcp_project_id",
         "gcs_bucket",
         "gcs_signing_service_account",
         mode="before",
@@ -54,6 +69,10 @@ class Settings(BaseSettings):
             raise ValueError("an access token is required when binding beyond localhost")
         if self.storage_backend == "gcs" and not self.gcs_bucket:
             raise ValueError("a GCS bucket is required for the GCS storage backend")
+        if self.job_backend == "cloud_run" and not self.gcp_project_id:
+            raise ValueError(
+                "a Google Cloud project is required for the Cloud Run job backend"
+            )
         return self
 
 
