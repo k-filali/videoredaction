@@ -17,7 +17,7 @@ class AccessTokenMiddleware:
         if (
             self.access_token is None
             or scope["type"] != "http"
-            or scope.get("path") == "/api/health"
+            or scope.get("path") in {"/api/health", "/api/ready"}
             or scope.get("method") == "OPTIONS"
         ):
             await self.app(scope, receive, send)

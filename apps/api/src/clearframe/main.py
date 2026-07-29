@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -5,6 +6,9 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from starlette.responses import JSONResponse
 
 from clearframe import __version__
 from clearframe.api.exports import router as exports_router
@@ -17,6 +21,8 @@ from clearframe.middleware import AccessTokenMiddleware, UploadLimitMiddleware
 from clearframe.observability import RequestTraceMiddleware, configure_observability
 from clearframe.services.container import ServiceContainer
 from clearframe.services.processing import ProcessingService
+
+SCHEMA_HEAD = "f2a39c7e51d4"
 
 
 @asynccontextmanager
@@ -87,6 +93,38 @@ def create_app(
     @app.get("/api/health", tags=["system"])
     async def health() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
+
+    @app.get("/api/ready", tags=["system"])
+    async def ready() -> JSONResponse:
+        revision: str | None = None
+        database_ready = False
+        try:
+            with resolved_database.engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+                revision = connection.scalar(
+                    text("SELECT version_num FROM alembic_version")
+                )
+                database_ready = True
+        except SQLAlchemyError:
+            pass
+        checks = {
+            "database": database_ready,
+            "schema": revision == SCHEMA_HEAD,
+            "storage": (
+                resolved_services.storage.root.is_dir()
+                and os.access(resolved_services.storage.root, os.W_OK)
+            ),
+            "ffmpeg": resolved_services.media.ffmpeg_path.is_file(),
+        }
+        is_ready = all(checks.values())
+        return JSONResponse(
+            status_code=200 if is_ready else 503,
+            content={
+                "status": "ready" if is_ready else "not_ready",
+                "checks": checks,
+                "schema_revision": revision,
+            },
+        )
 
     return app
 
