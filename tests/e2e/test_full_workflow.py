@@ -111,16 +111,31 @@ def test_upload_detect_review_export_workflow(tmp_path: Path) -> None:
                     f"/api/videos/{video_id}/reprocessing-suggestions"
                 )
                 assert suggestions.status_code == 200
-                assert suggestions.json()
+                suggestion_payloads = suggestions.json()
+                assert suggestion_payloads
                 assert {
                     suggestion["source_action_id"]
-                    for suggestion in suggestions.json()
+                    for suggestion in suggestion_payloads
                 } == {corrected_payload["action"]["id"]}
                 assert all(
                     suggestion["frame_index"] != 5
-                    for suggestion in suggestions.json()
+                    for suggestion in suggestion_payloads
                 )
                 state = corrected_payload["state"]
+                for suggestion in suggestion_payloads:
+                    dismissed = await client.post(
+                        (
+                            f"/api/videos/{video_id}/reprocessing-suggestions/"
+                            f"{suggestion['id']}/dismiss"
+                        ),
+                        headers={"X-Reviewer-Session": "e2e-reviewer"},
+                        json={
+                            "expected_revision": state["revision"],
+                            "reason_code": "e2e_context_reviewed",
+                        },
+                    )
+                    assert dismissed.status_code == 200
+                    assert dismissed.json()["suggestion"]["status"] == "DISMISSED"
 
                 manual = await client.post(
                     f"/api/videos/{video_id}/manual-regions",
