@@ -111,3 +111,53 @@ class UploadLimitMiddleware:
             content={"detail": "request exceeds the configured upload limit"},
         )
         await response(scope, receive, send)
+
+
+class RequestBodyLimitMiddleware:
+    def __init__(self, app: ASGIApp, *, max_request_bytes: int) -> None:
+        self.app = app
+        self.max_request_bytes = max_request_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if not self._is_limited_request(scope):
+            await self.app(scope, receive, send)
+            return
+
+        content_length = UploadLimitMiddleware._content_length(scope)
+        if content_length is not None and content_length > self.max_request_bytes:
+            await self._reject(scope, receive, send)
+            return
+
+        consumed = 0
+
+        async def limited_receive() -> Message:
+            nonlocal consumed
+            message = await receive()
+            consumed += len(message.get("body", b""))
+            if consumed > self.max_request_bytes:
+                raise PayloadTooLargeError
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except PayloadTooLargeError:
+            await self._reject(scope, receive, send)
+
+    @staticmethod
+    def _is_limited_request(scope: Scope) -> bool:
+        return (
+            scope["type"] == "http"
+            and scope.get("method") in {"PATCH", "POST", "PUT"}
+            and not (
+                scope.get("method") == "POST"
+                and scope.get("path") == "/api/videos"
+            )
+        )
+
+    @staticmethod
+    async def _reject(scope: Scope, receive: Receive, send: Send) -> None:
+        response = JSONResponse(
+            status_code=413,
+            content={"detail": "request body exceeds the configured API limit"},
+        )
+        await response(scope, receive, send)

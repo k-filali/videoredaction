@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
-from clearframe.domain.enums import ReviewActionType, TrackSource
+from clearframe.domain.enums import RedactionClass, ReviewActionType, TrackSource
 from clearframe.domain.geometry import NormalizedBox
 
 
@@ -15,7 +15,7 @@ class ReviewKeyframe(BaseModel):
 
 class TrackReviewState(BaseModel):
     track_id: str
-    class_name: str
+    class_name: RedactionClass
     source: TrackSource
     active: bool = True
     redacted: bool = True
@@ -32,6 +32,14 @@ class TrackReviewState(BaseModel):
     def validate_span(self) -> "TrackReviewState":
         if self.end_frame < self.start_frame or self.end_ms < self.start_ms:
             raise ValueError("track end cannot precede track start")
+        if any(
+            not (
+                self.start_frame <= keyframe.frame_index <= self.end_frame
+                and self.start_ms <= keyframe.timestamp_ms <= self.end_ms
+            )
+            for keyframe in self.keyframes
+        ):
+            raise ValueError("track keyframes must fall inside the track span")
         return self
 
     def upsert_keyframe(self, keyframe: ReviewKeyframe) -> None:
@@ -55,7 +63,7 @@ class ReviewCommand(BaseModel):
     frame_index: int | None = Field(default=None, ge=0)
     timestamp_ms: int | None = Field(default=None, ge=0)
     reason_code: str | None = Field(default=None, max_length=64)
-    payload: dict[str, Any] = Field(default_factory=dict)
+    payload: dict[str, Any] = Field(default_factory=dict, max_length=16)
 
 
 class ReviewActionRead(BaseModel):

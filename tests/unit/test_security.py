@@ -22,6 +22,7 @@ def test_access_token_protects_sensitive_api(tmp_path: Path) -> None:
         database_url=str(database.engine.url),
         storage_root=tmp_path / "storage",
         access_token="test-secret",
+        max_api_body_kb=16,
         env="test",
     )
     services = ServiceContainer.build(settings, database)
@@ -57,5 +58,18 @@ def test_access_token_protects_sensitive_api(tmp_path: Path) -> None:
                 )
                 assert authorized.status_code == 200
                 assert authorized.json() == {"items": [], "total": 0}
+
+                oversized = await client.post(
+                    "/api/videos/missing/review-actions",
+                    headers={
+                        "Authorization": "Bearer test-secret",
+                        "Content-Type": "application/json",
+                    },
+                    content=b'{"payload":"' + b"x" * (17 * 1024) + b'"}',
+                )
+                assert oversized.status_code == 413
+                assert oversized.json()["detail"] == (
+                    "request body exceeds the configured API limit"
+                )
 
     asyncio.run(exercise())

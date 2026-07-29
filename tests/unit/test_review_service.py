@@ -359,6 +359,44 @@ def test_track_spans_require_strict_integers(
         assert session.query(ReviewAction).count() == 0
 
 
+def test_review_class_and_media_bounds_are_enforced(tmp_path: Path) -> None:
+    database = create_database(tmp_path / "review-bounds.db")
+    video_id, track_id = seed_video(database)
+
+    with database.session() as session:
+        video = session.get(VideoAsset, video_id)
+        assert video is not None
+        video.duration_ms = 1100
+        video.fps = 10
+        session.commit()
+
+        with pytest.raises(ReviewError, match="supported redaction class"):
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.CHANGE_CLASS,
+                    expected_revision=0,
+                    track_id=track_id,
+                    payload={"class_name": "identity"},
+                ),
+                reviewer_session_id="reviewer-a",
+            )
+        with pytest.raises(ReviewError, match="video frame range"):
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.EXTEND_TRACK,
+                    expected_revision=0,
+                    track_id=track_id,
+                    payload={"end_frame": 11, "end_ms": 1100},
+                ),
+                reviewer_session_id="reviewer-a",
+            )
+        assert session.query(ReviewAction).count() == 0
+
+
 def test_review_is_blocked_during_processing(tmp_path: Path) -> None:
     database = create_database(tmp_path / "processing-review.db")
     video_id, track_id = seed_video(database)

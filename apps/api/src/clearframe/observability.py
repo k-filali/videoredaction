@@ -24,8 +24,6 @@ def configure_observability(log_level: str) -> None:
             merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
@@ -60,11 +58,12 @@ class RequestTraceMiddleware:
 
         try:
             await self.app(scope, receive, traced_send)
-        except Exception:
-            self.logger.exception(
+        except Exception as exc:
+            self.logger.error(
                 "request_failed",
                 method=scope.get("method"),
                 path=scope.get("path"),
+                error_type=type(exc).__name__,
             )
             raise
         finally:

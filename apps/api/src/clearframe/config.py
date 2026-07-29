@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/clearframe.db"
     storage_root: Path = Path("./storage")
     max_upload_mb: int = Field(default=2048, gt=0)
+    max_api_body_kb: int = Field(default=1024, ge=16, le=10240)
     max_duration_minutes: int = Field(default=240, ge=1, le=1440)
     max_video_pixels: int = Field(default=9_000_000, ge=307_200)
     max_video_dimension: int = Field(default=8192, ge=640)

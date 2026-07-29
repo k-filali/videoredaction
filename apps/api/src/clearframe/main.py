@@ -17,7 +17,11 @@ from clearframe.api.review import router as review_router
 from clearframe.api.videos import router as videos_router
 from clearframe.config import Settings, get_settings
 from clearframe.database import Database
-from clearframe.middleware import AccessTokenMiddleware, UploadLimitMiddleware
+from clearframe.middleware import (
+    AccessTokenMiddleware,
+    RequestBodyLimitMiddleware,
+    UploadLimitMiddleware,
+)
 from clearframe.observability import RequestTraceMiddleware, configure_observability
 from clearframe.services.container import ServiceContainer
 from clearframe.services.processing import ProcessingService
@@ -68,6 +72,10 @@ def create_app(
     app.add_middleware(
         UploadLimitMiddleware,
         max_upload_bytes=resolved_settings.max_upload_mb * 1024 * 1024,
+    )
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_request_bytes=resolved_settings.max_api_body_kb * 1024,
     )
     app.add_middleware(
         AccessTokenMiddleware,

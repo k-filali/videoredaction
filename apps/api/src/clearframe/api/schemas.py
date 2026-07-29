@@ -7,6 +7,7 @@ from clearframe.domain.enums import (
     ExportStatus,
     JobStatus,
     JobType,
+    RedactionClass,
     RedactionStyle,
     ReviewActionType,
     VideoStatus,
@@ -115,7 +116,7 @@ class ManualRegionCreate(BaseModel):
     expected_revision: int = Field(ge=0)
     frame_index: int = Field(ge=0)
     timestamp_ms: int = Field(ge=0)
-    class_name: str = Field(default="license_plate", min_length=1, max_length=48)
+    class_name: RedactionClass = RedactionClass.LICENSE_PLATE
     bbox: NormalizedBox
     start_frame: int | None = Field(default=None, ge=0)
     end_frame: int | None = Field(default=None, ge=0)

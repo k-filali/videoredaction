@@ -1,4 +1,5 @@
 from copy import deepcopy
+from math import ceil
 from typing import Any, cast
 from uuid import uuid4
 
@@ -7,7 +8,12 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from clearframe import __version__
-from clearframe.domain.enums import ReviewActionType, TrackSource, VideoStatus
+from clearframe.domain.enums import (
+    RedactionClass,
+    ReviewActionType,
+    TrackSource,
+    VideoStatus,
+)
 from clearframe.domain.geometry import NormalizedBox
 from clearframe.domain.review import (
     ReviewCommand,
@@ -173,6 +179,31 @@ def _validated_state(state: TrackReviewState) -> TrackReviewState:
         raise ReviewError("review action would create an invalid track span") from exc
 
 
+def _redaction_class(value: object) -> RedactionClass:
+    if isinstance(value, RedactionClass):
+        return value
+    if not isinstance(value, str):
+        raise ReviewError("class_name is not a supported redaction class")
+    try:
+        return RedactionClass(value)
+    except ValueError as exc:
+        raise ReviewError("class_name is not a supported redaction class") from exc
+
+
+def _validate_video_bounds(
+    video: VideoAsset,
+    states: list[TrackReviewState],
+) -> None:
+    if video.duration_ms is not None and any(
+        state.end_ms > video.duration_ms for state in states
+    ):
+        raise ReviewError("track timestamp exceeds the video duration")
+    if video.duration_ms is not None and video.fps is not None and video.fps > 0:
+        last_frame = max(0, ceil(video.duration_ms * video.fps / 1000) - 1)
+        if any(state.end_frame > last_frame for state in states):
+            raise ReviewError("track frame exceeds the video frame range")
+
+
 def _updated_states(
     snapshot: ReviewSnapshot,
     command: ReviewCommand,
@@ -187,7 +218,9 @@ def _updated_states(
         track_id = command.track_id or str(uuid4())
         if track_id in snapshot.tracks:
             raise ReviewError("manual track id already exists")
-        class_name = str(command.payload.get("class_name", "license_plate"))
+        class_name = _redaction_class(
+            command.payload.get("class_name", RedactionClass.LICENSE_PLATE)
+        )
         start_ms = _integer_from_payload(command, "start_ms", command.timestamp_ms)
         end_ms = _integer_from_payload(command, "end_ms", command.timestamp_ms)
         start_frame = _integer_from_payload(command, "start_frame", command.frame_index)
@@ -249,10 +282,7 @@ def _updated_states(
         updated.active = True
         updated.accepted = True
     elif action_type == ReviewActionType.CHANGE_CLASS:
-        new_class_name = command.payload.get("class_name")
-        if not isinstance(new_class_name, str) or not new_class_name:
-            raise ReviewError("class_name is required")
-        updated.class_name = new_class_name
+        updated.class_name = _redaction_class(command.payload.get("class_name"))
         updated.accepted = True
     elif action_type in {ReviewActionType.EXTEND_TRACK, ReviewActionType.TRIM_TRACK}:
         start_ms = _integer_from_payload(command, "start_ms", updated.start_ms)
@@ -265,6 +295,15 @@ def _updated_states(
         updated.end_ms = end_ms
         updated.start_frame = start_frame
         updated.end_frame = end_frame
+        if action_type == ReviewActionType.TRIM_TRACK:
+            updated.keyframes = [
+                keyframe
+                for keyframe in updated.keyframes
+                if (
+                    start_frame <= keyframe.frame_index <= end_frame
+                    and start_ms <= keyframe.timestamp_ms <= end_ms
+                )
+            ]
         updated.accepted = True
     elif action_type == ReviewActionType.SPLIT_TRACK:
         split_ms = _integer_from_payload(command, "split_ms", -1)
@@ -468,6 +507,13 @@ def append_review_action(
         after_ids = {state.track_id for state in after}
         before_payload = _state_payload(before, sorted(after_ids - before_ids))
         after_payload = _state_payload(after, sorted(before_ids - after_ids))
+    _validate_video_bounds(
+        video,
+        [
+            TrackReviewState.model_validate(raw)
+            for raw in after_payload.get("tracks", [])
+        ],
+    )
 
     next_revision = video.review_revision + 1
     reservation = cast(

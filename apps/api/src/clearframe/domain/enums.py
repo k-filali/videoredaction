@@ -31,6 +31,12 @@ class TrackSource(StrEnum):
     REPROCESSING = "REPROCESSING"
 
 
+class RedactionClass(StrEnum):
+    FACE = "face"
+    LICENSE_PLATE = "license_plate"
+    SCENE_TEXT = "scene_text"
+
+
 class ProposalSource(StrEnum):
     MODEL = "MODEL"
     MOCK = "MOCK"
