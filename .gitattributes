@@ -7,4 +7,4 @@
 *.jpeg binary
 *.mp4 binary
 *.mov binary
-
+*.sh text eol=lf
