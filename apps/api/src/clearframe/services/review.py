@@ -22,6 +22,7 @@ from clearframe.domain.review import (
     TrackReviewState,
 )
 from clearframe.models import ReviewAction, Track, TrackKeyframe, VideoAsset
+from clearframe.rendering import box_at_frame
 
 
 class ReviewError(ValueError):
@@ -291,11 +292,52 @@ def _updated_states(
         end_frame = _integer_from_payload(command, "end_frame", updated.end_frame)
         if start_ms > end_ms or start_frame > end_frame:
             raise ReviewError("track start cannot follow track end")
+        if action_type == ReviewActionType.TRIM_TRACK:
+            if (
+                start_ms < current.start_ms
+                or end_ms > current.end_ms
+                or start_frame < current.start_frame
+                or end_frame > current.end_frame
+            ):
+                raise ReviewError("trim must stay inside the current track span")
+            if (
+                start_ms == current.start_ms
+                and end_ms == current.end_ms
+                and start_frame == current.start_frame
+                and end_frame == current.end_frame
+            ):
+                raise ReviewError("trim must narrow the track span")
+        else:
+            if (
+                start_ms > current.start_ms
+                or end_ms < current.end_ms
+                or start_frame > current.start_frame
+                or end_frame < current.end_frame
+            ):
+                raise ReviewError("extension must contain the current track span")
+            if (
+                start_ms == current.start_ms
+                and end_ms == current.end_ms
+                and start_frame == current.start_frame
+                and end_frame == current.end_frame
+            ):
+                raise ReviewError("extension must widen the track span")
+
+        if not current.keyframes:
+            raise ReviewError("track span requires existing geometry")
+
         updated.start_ms = start_ms
         updated.end_ms = end_ms
         updated.start_frame = start_frame
         updated.end_frame = end_frame
         if action_type == ReviewActionType.TRIM_TRACK:
+            boundary_source = current.model_copy(
+                update={"active": True, "redacted": True}
+            )
+            start_box = box_at_frame(boundary_source, start_frame)
+            end_box = box_at_frame(boundary_source, end_frame)
+            if start_box is None or end_box is None:
+                raise ReviewError("track span requires existing geometry")
             updated.keyframes = [
                 keyframe
                 for keyframe in updated.keyframes
@@ -304,6 +346,21 @@ def _updated_states(
                     and start_ms <= keyframe.timestamp_ms <= end_ms
                 )
             ]
+            updated.upsert_keyframe(
+                ReviewKeyframe(
+                    frame_index=start_frame,
+                    timestamp_ms=start_ms,
+                    bbox=start_box,
+                )
+            )
+            if end_frame != start_frame:
+                updated.upsert_keyframe(
+                    ReviewKeyframe(
+                        frame_index=end_frame,
+                        timestamp_ms=end_ms,
+                        bbox=end_box,
+                    )
+                )
         updated.accepted = True
     elif action_type == ReviewActionType.SPLIT_TRACK:
         split_ms = _integer_from_payload(command, "split_ms", -1)
@@ -313,6 +370,12 @@ def _updated_states(
             and updated.start_frame < split_frame < updated.end_frame
         ):
             raise ReviewError("split point must be inside the track span")
+        boundary_source = current.model_copy(
+            update={"active": True, "redacted": True}
+        )
+        split_box = box_at_frame(boundary_source, split_frame)
+        if split_box is None:
+            raise ReviewError("split point requires existing geometry")
         child = updated.model_copy(deep=True)
         child.track_id = str(uuid4())
         child.source = TrackSource.MANUAL
@@ -326,6 +389,13 @@ def _updated_states(
         updated.keyframes = [
             keyframe for keyframe in updated.keyframes if keyframe.frame_index <= split_frame
         ]
+        boundary_keyframe = ReviewKeyframe(
+            frame_index=split_frame,
+            timestamp_ms=split_ms,
+            bbox=split_box,
+        )
+        updated.upsert_keyframe(boundary_keyframe)
+        child.upsert_keyframe(boundary_keyframe)
         updated.accepted = True
         child.accepted = True
         return before, [_validated_state(updated), _validated_state(child)], inverse_of

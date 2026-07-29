@@ -335,6 +335,100 @@ def test_invalid_track_span_is_rejected_before_audit_append(tmp_path: Path) -> N
         assert build_review_snapshot(session, video_id).revision == 0
 
 
+def test_trim_preserves_boundary_geometry(tmp_path: Path) -> None:
+    database = create_database(tmp_path / "trim-geometry.db")
+    video_id, track_id = seed_video(database)
+
+    with database.session() as session:
+        _, snapshot = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.TRIM_TRACK,
+                expected_revision=0,
+                track_id=track_id,
+                payload={
+                    "start_frame": 5,
+                    "start_ms": 500,
+                    "end_frame": 10,
+                    "end_ms": 1000,
+                },
+            ),
+            reviewer_session_id="reviewer-a",
+        )
+
+        trimmed = snapshot.tracks[track_id]
+        assert [keyframe.frame_index for keyframe in trimmed.keyframes] == [5, 10]
+        assert all(
+            keyframe.bbox.as_list() == [0.1, 0.2, 0.3, 0.4]
+            for keyframe in trimmed.keyframes
+        )
+
+        with pytest.raises(ReviewError, match="inside the current track span"):
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.TRIM_TRACK,
+                    expected_revision=1,
+                    track_id=track_id,
+                    payload={"start_frame": 0, "start_ms": 0},
+                ),
+                reviewer_session_id="reviewer-a",
+            )
+
+
+def test_track_extension_cannot_shift_the_span(tmp_path: Path) -> None:
+    database = create_database(tmp_path / "extend-direction.db")
+    video_id, track_id = seed_video(database)
+
+    with database.session() as session:
+        with pytest.raises(ReviewError, match="contain the current track span"):
+            append_review_action(
+                session,
+                video_id,
+                ReviewCommand(
+                    action_type=ReviewActionType.EXTEND_TRACK,
+                    expected_revision=0,
+                    track_id=track_id,
+                    payload={
+                        "start_frame": 2,
+                        "start_ms": 200,
+                        "end_frame": 12,
+                        "end_ms": 1200,
+                    },
+                ),
+                reviewer_session_id="reviewer-a",
+            )
+        assert session.query(ReviewAction).count() == 0
+
+
+def test_split_adds_geometry_to_both_boundaries(tmp_path: Path) -> None:
+    database = create_database(tmp_path / "split-geometry.db")
+    video_id, track_id = seed_video(database)
+
+    with database.session() as session:
+        _, snapshot = append_review_action(
+            session,
+            video_id,
+            ReviewCommand(
+                action_type=ReviewActionType.SPLIT_TRACK,
+                expected_revision=0,
+                track_id=track_id,
+                payload={"split_frame": 5, "split_ms": 500},
+            ),
+            reviewer_session_id="reviewer-a",
+        )
+
+        parent = snapshot.tracks[track_id]
+        child = next(
+            track for current_id, track in snapshot.tracks.items() if current_id != track_id
+        )
+        assert parent.keyframes[-1].frame_index == 5
+        assert child.keyframes[0].frame_index == 5
+        assert parent.keyframes[-1].bbox == child.keyframes[0].bbox
+
+
 @pytest.mark.parametrize("invalid_frame", [True, 1.5, float("inf"), "2"])
 def test_track_spans_require_strict_integers(
     tmp_path: Path,
