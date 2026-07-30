@@ -19,6 +19,7 @@ import type {
   VideoListResponse,
   VideoStatusResponse,
 } from "./types";
+import { defaultDetectionKits } from "./lib/detectionKits";
 import {
   RESUMABLE_CHUNK_SIZE_BYTES,
   uploadFileResumable,
@@ -124,12 +125,18 @@ export const api = {
 
   getAudit: (videoId: string) => request<AuditLog>(`/api/videos/${videoId}/audit`),
 
-  processVideo: (videoId: string, sampleEveryFrames = 5, modelIds?: string[]) =>
+  // Omitting model_ids makes the API run every enabled detector, so the
+  // vertical default is applied here rather than at each call site.
+  processVideo: (
+    videoId: string,
+    sampleEveryFrames = 5,
+    modelIds: string[] = defaultDetectionKits,
+  ) =>
     request<ProcessingAccepted>(`/api/videos/${videoId}/process`, {
       method: "POST",
       body: JSON.stringify({
         sample_every_frames: sampleEveryFrames,
-        ...(modelIds && modelIds.length > 0 ? { model_ids: modelIds } : {}),
+        ...(modelIds.length > 0 ? { model_ids: modelIds } : {}),
       }),
     }),
 

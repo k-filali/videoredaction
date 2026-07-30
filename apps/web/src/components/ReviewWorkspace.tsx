@@ -8,6 +8,10 @@ import {
 } from "react";
 
 import { ApiError, api, mediaUrl } from "../api";
+import {
+  defaultDetectionKits,
+  detectionKitOptions,
+} from "../lib/detectionKits";
 import { boxAtFrame, formatTime } from "../lib/geometry";
 import type {
   AuditAction,
@@ -51,16 +55,6 @@ const classColours: Record<string, string> = {
 
 const exportFinished = new Set(["COMPLETED", "FAILED"]);
 
-// License plates are the MVP vertical, so only that kit runs by default.
-// Face detection stays available for reviewers who opt in.
-const detectionKitOptions = [
-  { id: "yolov9t-plate", label: "License plates", enabledByDefault: true },
-  { id: "yunet-face", label: "Faces", enabledByDefault: false },
-];
-
-const defaultDetectionKits = detectionKitOptions
-  .filter((option) => option.enabledByDefault)
-  .map((option) => option.id);
 
 function classLabel(value: string): string {
   if (value === "license_plate") return "License plate";

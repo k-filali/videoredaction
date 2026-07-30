@@ -111,3 +111,46 @@ describe("video upload transport selection", () => {
     expect(progress).toHaveBeenLastCalledWith(1);
   });
 });
+
+describe("detection kit defaults", () => {
+  function stubFetch() {
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => "review-test",
+      setItem: () => undefined,
+    });
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ run: {}, job: {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    return fetcher;
+  }
+
+  function bodyOf(fetcher: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    const init = fetcher.mock.calls[0]?.[1] as RequestInit;
+    return JSON.parse(String(init.body)) as Record<string, unknown>;
+  }
+
+  it("sends the plate-only vertical default when a caller omits kits", async () => {
+    // The dashboard starts detection without a picker. Omitting model_ids
+    // would make the API run every enabled detector, including faces.
+    const fetcher = stubFetch();
+
+    await api.processVideo("video-id");
+
+    expect(bodyOf(fetcher).model_ids).toEqual(["yolov9t-plate"]);
+  });
+
+  it("honours an explicit kit selection", async () => {
+    const fetcher = stubFetch();
+
+    await api.processVideo("video-id", 5, ["yolov9t-plate", "yunet-face"]);
+
+    expect(bodyOf(fetcher).model_ids).toEqual([
+      "yolov9t-plate",
+      "yunet-face",
+    ]);
+  });
+});
