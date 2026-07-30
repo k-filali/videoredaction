@@ -16,7 +16,7 @@ dependencies = [
   "imageio-ffmpeg>=0.6,<1",
   "numpy>=2.2,<3",
   "onnxruntime-gpu>=1.26,<1.27",
-  "opencv-python-headless>=4.11,<5",
+  "opencv-contrib-python-headless>=4.11,<5",
   "pydantic-settings>=2.10,<3",
   "psycopg[binary]==3.3.4",
   "PyYAML>=6.0.2,<7",

@@ -4,6 +4,7 @@ from pathlib import Path
 from threading import Event
 
 import cv2
+import numpy as np
 import pytest
 from sqlalchemy import select
 from tests.helpers import generate_test_video
@@ -667,3 +668,31 @@ def test_manual_region_uses_static_fallback_within_declared_span(tmp_path: Path)
             assert corrected["locked"] is True
     finally:
         runner.shutdown()
+
+
+def test_runtime_provides_a_working_csrt_tracker() -> None:
+    """Context propagation degrades to static boxes without OpenCV contrib.
+
+    `opencv-python-headless` omits the tracking module, so the CSRT factory
+    returns None and every suggestion silently falls back to interpolation.
+    The failure is invisible at runtime, so pin it here.
+    """
+    factory = ReprocessingService._csrt_factory()
+
+    assert factory is not None, (
+        "OpenCV build has no TrackerCSRT; "
+        "opencv-contrib-python-headless is required"
+    )
+
+    # Track a high-contrast square that moves 20px between frames.
+    first = np.zeros((200, 200, 3), dtype=np.uint8)
+    first[80:120, 50:90] = 255
+    second = np.zeros((200, 200, 3), dtype=np.uint8)
+    second[80:120, 70:110] = 255
+
+    tracker = factory()
+    tracker.init(first, (50, 80, 40, 40))
+    located, box = tracker.update(second)
+
+    assert located
+    assert box[0] > 55, f"tracker did not follow the square: {box}"
