@@ -48,13 +48,13 @@ ARTIFACTS = {
     ),
     "plate": ModelArtifact(
         key="plate",
-        filename="license_plate_detection_yolov9t_384.onnx",
+        filename="license_plate_detection_yolov9s_608.onnx",
         url=(
             "https://github.com/ankandrew/open-image-models/releases/download/"
-            "assets/yolo-v9-t-384-license-plates-end2end.onnx"
+            "assets/yolo-v9-s-608-license-plates-end2end.onnx"
         ),
-        size_bytes=7_771_218,
-        sha256="888397b96d761c89db40bc9c305838e8652660f5e282c2cadebbe8d2951a77a8",
+        size_bytes=28_612_350,
+        sha256="2b878b38d9aa07b6ddc3ea75c4ffcb39869bc5c218e0a14002f60ab2f7b0be9a",
         license_spdx="MIT",
         license_url="https://github.com/ankandrew/open-image-models/blob/main/LICENSE",
     ),

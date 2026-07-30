@@ -48,8 +48,8 @@ def test_model_artifacts_are_immutable_and_verified() -> None:
 def test_primary_plate_artifact_uses_semantic_local_filename() -> None:
     artifact = ARTIFACTS["plate"]
 
-    assert artifact.filename == "license_plate_detection_yolov9t_384.onnx"
-    assert artifact.url.endswith("yolo-v9-t-384-license-plates-end2end.onnx")
+    assert artifact.filename == "license_plate_detection_yolov9s_608.onnx"
+    assert artifact.url.endswith("yolo-v9-s-608-license-plates-end2end.onnx")
     assert artifact.license_spdx == "MIT"
 
 

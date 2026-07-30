@@ -30,9 +30,6 @@ from clearframe.pipeline.onnx_runtime import (
     select_execution_providers,
 )
 
-_INPUT_HEIGHT = 384
-_INPUT_WIDTH = 384
-_INPUT_SHAPE = (1, 3, _INPUT_HEIGHT, _INPUT_WIDTH)
 _LETTERBOX_COLOR = (114, 114, 114)
 _PLATE_CLASS_ID = 0
 
@@ -61,20 +58,20 @@ class _Letterbox:
     pad_y: int
 
 
-def _letterbox(frame: Frame) -> _Letterbox:
+def _letterbox(frame: Frame, input_width: int, input_height: int) -> _Letterbox:
     height, width = frame.shape[:2]
-    scale = min(_INPUT_WIDTH / width, _INPUT_HEIGHT / height)
-    resized_width = max(1, min(_INPUT_WIDTH, round(width * scale)))
-    resized_height = max(1, min(_INPUT_HEIGHT, round(height * scale)))
+    scale = min(input_width / width, input_height / height)
+    resized_width = max(1, min(input_width, round(width * scale)))
+    resized_height = max(1, min(input_height, round(height * scale)))
     resized = cv2.resize(
         frame,
         (resized_width, resized_height),
         interpolation=cv2.INTER_LINEAR,
     )
-    pad_x = (_INPUT_WIDTH - resized_width) // 2
-    pad_y = (_INPUT_HEIGHT - resized_height) // 2
+    pad_x = (input_width - resized_width) // 2
+    pad_y = (input_height - resized_height) // 2
     canvas = np.full(
-        (_INPUT_HEIGHT, _INPUT_WIDTH, 3),
+        (input_height, input_width, 3),
         _LETTERBOX_COLOR,
         dtype=np.uint8,
     )
@@ -99,13 +96,27 @@ def _input_tensor(image: Frame) -> NDArray[np.float32]:
     ) / np.float32(255.0)
 
 
-def _validate_session(session: OnnxSession) -> str:
+def _validate_session(session: OnnxSession) -> tuple[str, int, int]:
     inputs = tuple(session.get_inputs())
     if len(inputs) != 1:
         raise RuntimeError("YOLOv9 model must expose exactly one input")
     input_spec = inputs[0]
-    if tuple(input_spec.shape) != _INPUT_SHAPE:
-        raise RuntimeError(f"YOLOv9 input shape must be {_INPUT_SHAPE}")
+    shape = tuple(input_spec.shape)
+    # Height and width are read from the model rather than hard-coded, so a
+    # higher-resolution export (e.g. 640) can be swapped in without code
+    # changes. Batch and channel dimensions must still be fixed at 1x3.
+    if (
+        len(shape) != 4
+        or shape[0] != 1
+        or shape[1] != 3
+        or not isinstance(shape[2], int)
+        or not isinstance(shape[3], int)
+        or shape[2] <= 0
+        or shape[3] <= 0
+    ):
+        raise RuntimeError(
+            "YOLOv9 input shape must be 1x3xHxW with a fixed height and width"
+        )
     if input_spec.type != "tensor(float)":
         raise RuntimeError("YOLOv9 input must contain float32 values")
 
@@ -115,7 +126,7 @@ def _validate_session(session: OnnxSession) -> str:
     output_shape = tuple(outputs[0].shape)
     if len(output_shape) != 2 or output_shape[1] != 7:
         raise RuntimeError("YOLOv9 output shape must be N x 7")
-    return input_spec.name
+    return input_spec.name, int(shape[3]), int(shape[2])
 
 
 def _detection_rows(raw_output: object) -> NDArray[np.float32]:
@@ -182,6 +193,8 @@ class OnnxRuntimeYoloV9PlateDetector:
         self._max_aspect_ratio = max_aspect_ratio
         self._session: OnnxSession | None = None
         self._input_name: str | None = None
+        self._input_width: int | None = None
+        self._input_height: int | None = None
         self._provider: str | None = None
         self._device: str | None = None
         self._max_concurrency = 1
@@ -215,7 +228,7 @@ class OnnxRuntimeYoloV9PlateDetector:
                 requested_providers,
                 _factory,
             )
-            input_name = _validate_session(session)
+            input_name, input_width, input_height = _validate_session(session)
             provider = active_execution_provider(session, requested_providers)
         except Exception as exc:
             self._availability = DetectorAvailability(
@@ -226,6 +239,8 @@ class OnnxRuntimeYoloV9PlateDetector:
 
         self._session = session
         self._input_name = input_name
+        self._input_width = input_width
+        self._input_height = input_height
         self._provider = provider
         self._device = provider_device(provider)
         self._availability = DetectorAvailability(True)
@@ -247,12 +262,17 @@ class OnnxRuntimeYoloV9PlateDetector:
         return self._max_concurrency
 
     def detect(self, frame: Frame, context: DetectionContext) -> list[DetectionProposal]:
-        if self._session is None or self._input_name is None:
+        if (
+            self._session is None
+            or self._input_name is None
+            or self._input_width is None
+            or self._input_height is None
+        ):
             raise DetectorUnavailableError(self._availability.reason or "detector unavailable")
 
         image = _as_bgr(frame)
         height, width = image.shape[:2]
-        letterbox = _letterbox(image)
+        letterbox = _letterbox(image, self._input_width, self._input_height)
         tensor = _input_tensor(letterbox.image)
         with self._inference_gate:
             outputs = self._session.run(None, {self._input_name: tensor})

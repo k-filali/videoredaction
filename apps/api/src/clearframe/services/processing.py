@@ -587,7 +587,12 @@ class ProcessingService:
                 future.result()
                 for future in pending.futures
             )
+            # Confident detections are persisted and may start tracks.
+            # Provisional detections (tracking_confidence <= score <
+            # confidence) are held back from persistence but still offered to
+            # the tracker so a flickering plate keeps its existing track alive.
             frame_observations: list[_ObservedDetection] = []
+            frame_candidates: list[DetectionProposal] = []
             for binding, proposals, inference_ms in detector_results:
                 inference_totals[binding.entry.id] += inference_ms
                 for proposal in proposals:
@@ -598,8 +603,12 @@ class ProcessingService:
                         raise ProcessingValidationError(
                             f"{binding.entry.id}: detector returned an unsupported class"
                         )
+                    if proposal.provisional:
+                        frame_candidates.append(proposal)
+                        continue
                     if proposal.confidence < binding.entry.thresholds.confidence:
                         continue
+                    frame_candidates.append(proposal)
                     frame_observations.append(
                         _ObservedDetection(
                             proposal=proposal,
@@ -616,18 +625,15 @@ class ProcessingService:
 
             kept: set[int] = set()
             for class_name in sorted(
-                {
-                    item.proposal.class_name
-                    for item in frame_observations
-                }
+                {proposal.class_name for proposal in frame_candidates}
             ):
                 kept.update(
                     id(proposal)
                     for proposal in class_aware_nms(
                         (
-                            item.proposal
-                            for item in frame_observations
-                            if item.proposal.class_name == class_name
+                            proposal
+                            for proposal in frame_candidates
+                            if proposal.class_name == class_name
                         ),
                         iou_threshold=nms_thresholds[class_name],
                     )
@@ -643,9 +649,9 @@ class ProcessingService:
                 for item in frame_observations
             )
             tracking_proposals.extend(
-                item.proposal
-                for item in frame_observations
-                if id(item.proposal) in kept
+                proposal
+                for proposal in frame_candidates
+                if id(proposal) in kept
             )
             frames_completed += 1
             if frames_completed % progress_interval == 0:

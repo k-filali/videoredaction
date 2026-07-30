@@ -422,6 +422,86 @@ def test_nms_preserves_raw_detections_and_only_filters_tracking(tmp_path: Path) 
         runner.shutdown()
 
 
+class _ProvisionalContinuityDetector:
+    name = "provisional_test"
+    version = "1.0"
+    supported_classes = frozenset({"license_plate"})
+
+    @property
+    def availability(self) -> DetectorAvailability:
+        return DetectorAvailability(available=True)
+
+    def detect(
+        self,
+        frame: Frame,
+        context: DetectionContext,
+    ) -> list[DetectionProposal]:
+        del frame
+        # A single confident detection on frame 0 spawns the track; every later
+        # sample is a weak provisional box at the same spot, standing in for a
+        # plate that flickers below the confidence threshold.
+        confident = context.frame_index == 0
+        return [
+            DetectionProposal(
+                frame_index=context.frame_index,
+                timestamp_ms=context.timestamp_ms,
+                class_name="license_plate",
+                bbox=NormalizedBox(x1=0.2, y1=0.6, x2=0.5, y2=0.75),
+                confidence=0.99 if confident else 0.2,
+                detector_name=self.name,
+                detector_version=self.version,
+                provisional=not confident,
+            )
+        ]
+
+
+class _ProvisionalProcessingService(ProcessingService):
+    def _build_detector(self, entry: ModelEntry) -> Detector:
+        del entry
+        return _ProvisionalContinuityDetector()
+
+
+def test_provisional_detections_extend_tracks_without_being_persisted(
+    tmp_path: Path,
+) -> None:
+    database, storage, runner, _, video_id = _build_processing(tmp_path)
+    service = _ProvisionalProcessingService(
+        database,
+        storage,
+        runner,
+        registry_path=MOCK_MODEL_REGISTRY_PATH,
+    )
+    runner.register(JobType.DETECT, service.execute)
+    try:
+        requested = service.request(video_id, sample_every_frames=3)
+        runner.wait(requested.job.id, timeout=60)
+
+        with database.session() as session:
+            run = session.get(ModelRun, requested.run.id)
+            assert run is not None
+            detections = list(
+                session.scalars(
+                    select(Detection).where(Detection.model_run_id == run.id)
+                )
+            )
+            frames_sampled = run.metrics["frames_sampled"]
+            assert frames_sampled >= 2
+            # Only the confident frame-0 box is persisted as a detection.
+            assert run.metrics["detections"] == 1
+            assert len(detections) == 1
+            # Provisional boxes are dropped from persistence but still reach
+            # the tracker (before the fix these were filtered out entirely).
+            assert run.metrics["tracker_detections"] == frames_sampled
+            assert run.metrics["provisional_detections"] == frames_sampled - 1
+            # The weak evidence keeps a single track alive across the clip.
+            assert session.scalar(
+                select(func.count(Track.id)).where(Track.model_run_id == run.id)
+            ) == 1
+            assert run.metrics["observed_track_points"] == frames_sampled
+    finally:
+        runner.shutdown()
+
+
 def test_repeat_run_replaces_review_scope_until_review_starts(tmp_path: Path) -> None:
     database, _, runner, service, video_id = _build_processing(tmp_path)
     runner.register(JobType.DETECT, service.execute)

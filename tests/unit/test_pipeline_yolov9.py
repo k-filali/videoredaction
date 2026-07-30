@@ -257,7 +257,7 @@ def test_yolov9_reports_model_load_and_contract_failures(tmp_path: Path) -> None
     incompatible_session = _StubSession(np.empty((0, 7), dtype=np.float32))
     incompatible_session.input_spec = _StubNodeArgument(
         name="images",
-        shape=(1, 3, 640, 640),
+        shape=(1, 3, "height", "width"),
         type="tensor(float)",
     )
     incompatible_detector = OnnxRuntimeYoloV9PlateDetector(
@@ -271,6 +271,30 @@ def test_yolov9_reports_model_load_and_contract_failures(tmp_path: Path) -> None
     assert not incompatible_detector.availability.available
     assert incompatible_detector.availability.reason is not None
     assert "input shape" in incompatible_detector.availability.reason
+
+
+def test_yolov9_accepts_higher_resolution_input(tmp_path: Path) -> None:
+    # A 640x640 export must load and letterbox to its own input size, so a
+    # higher-recall model can be swapped in via the registry alone.
+    session = _StubSession(np.empty((0, 7), dtype=np.float32))
+    session.input_spec = _StubNodeArgument(
+        name="images",
+        shape=(1, 3, 640, 640),
+        type="tensor(float)",
+    )
+    detector = OnnxRuntimeYoloV9PlateDetector(
+        _model_file(tmp_path),
+        _factory=lambda _path, _providers: session,
+        _available_providers=lambda: ("CPUExecutionProvider",),
+    )
+    frame = np.full((200, 400, 3), (10, 20, 30), dtype=np.uint8)
+
+    proposals = detector.detect(frame, DetectionContext(frame_index=0, timestamp_ms=0))
+
+    assert detector.availability.available
+    assert proposals == []
+    _output_names, input_feed = session.run_calls[0]
+    assert input_feed["images"].shape == (1, 3, 640, 640)
 
 
 def test_yolov9_rejects_invalid_configuration(tmp_path: Path) -> None:

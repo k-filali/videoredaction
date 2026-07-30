@@ -1,9 +1,9 @@
 schema_version: 1
 models:
   - id: yolov9t-plate
-    display_name: YOLOv9-t licence plate detector
+    display_name: YOLOv9-s licence plate detector
     adapter: onnxruntime_yolov9
-    model_version: "open-image-models-384-end2end"
+    model_version: "open-image-models-608-end2end"
     adapter_version: "1.0.0"
     enabled: true
     deployment_allowed: true
@@ -24,8 +24,8 @@ models:
       max_aspect_ratio: 3.5
     weights:
       source: local
-      path: weights/license_plate_detection_yolov9t_384.onnx
-      sha256: 888397b96d761c89db40bc9c305838e8652660f5e282c2cadebbe8d2951a77a8
+      path: weights/license_plate_detection_yolov9s_608.onnx
+      sha256: 2b878b38d9aa07b6ddc3ea75c4ffcb39869bc5c218e0a14002f60ab2f7b0be9a
     license:
       spdx_id: MIT
       name: MIT License
