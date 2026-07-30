@@ -74,7 +74,10 @@ and virtualizes large track collections.
 
 ## Detection
 
-The default pipeline runs two local ONNX models: YOLOv9-t for licence plates and YuNet for faces.
+Licence plates are the product vertical, so plate detection is the only kit enabled by default.
+Face detection remains available and is one checkbox away in the detection kit picker.
+
+The pipeline ships two local ONNX models: YOLOv9-t for licence plates and YuNet for faces.
 Both prefer the CUDA execution provider and fall back to CPU in the CPU Compose profile. Their
 weights are included in `configs/models/weights`, verified by SHA-256 at startup, and configured in
 `configs/models/registry.yaml`. Detection samples the review proxy, applies class-specific

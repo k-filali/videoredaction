@@ -51,10 +51,16 @@ const classColours: Record<string, string> = {
 
 const exportFinished = new Set(["COMPLETED", "FAILED"]);
 
+// License plates are the MVP vertical, so only that kit runs by default.
+// Face detection stays available for reviewers who opt in.
 const detectionKitOptions = [
-  { id: "yolov9t-plate", label: "License plates" },
-  { id: "yunet-face", label: "Faces" },
+  { id: "yolov9t-plate", label: "License plates", enabledByDefault: true },
+  { id: "yunet-face", label: "Faces", enabledByDefault: false },
 ];
+
+const defaultDetectionKits = detectionKitOptions
+  .filter((option) => option.enabledByDefault)
+  .map((option) => option.id);
 
 function classLabel(value: string): string {
   if (value === "license_plate") return "License plate";
@@ -283,7 +289,7 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
     Record<string, ClassTreatment>
   >({});
   const [detectionKits, setDetectionKits] = useState<Set<string>>(
-    new Set(detectionKitOptions.map((option) => option.id)),
+    new Set(defaultDetectionKits),
   );
   const [exporting, setExporting] = useState(false);
   const [exportPollError, setExportPollError] = useState<string | null>(null);
