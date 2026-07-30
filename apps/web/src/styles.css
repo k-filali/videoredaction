@@ -1619,19 +1619,20 @@ img {
   position: absolute;
   bottom: calc(100% + 3px);
   left: -2px;
-  padding: 0.2rem 0.32rem;
-  border-radius: 0.2rem;
+  padding: 0.12rem 0.24rem;
+  border-radius: 0.15rem;
   color: #07110e;
-  background: currentColor;
-  font-size: 0.49rem;
+  background: #8ce8ca;
+  font-size: 0.42rem;
   font-weight: 750;
   line-height: 1;
   text-transform: capitalize;
   white-space: nowrap;
+  pointer-events: none;
 }
 
-.region-label::first-line {
-  color: #07110e;
+.region-outline:not(.is-selected) .region-label {
+  display: none;
 }
 
 .resize-handle {
@@ -2237,7 +2238,7 @@ kbd {
 .preset-options,
 .class-treatment-options {
   margin: 0;
-  padding: 0;
+  padding: 0 1.2rem;
   border: 0;
 }
 
@@ -2716,7 +2717,7 @@ kbd {
 .export-safety-note {
   display: flex;
   gap: 0.7rem;
-  margin: 0.9rem 1rem 0;
+  margin: 0.9rem 1.2rem 0;
   padding: 0.75rem;
   border: 1px solid rgba(101, 217, 180, 0.15);
   border-radius: 0.5rem;
@@ -2882,7 +2883,7 @@ kbd {
 }
 
 .export-modal {
-  width: min(31rem, 100%);
+  width: min(26rem, 100%);
   max-height: calc(100vh - 2rem);
   overflow-y: auto;
   border: 1px solid var(--line-strong);
@@ -2945,7 +2946,7 @@ kbd {
   display: grid;
   gap: 0.5rem;
   margin: 0;
-  padding: 0.2rem 1.2rem 1rem;
+  padding: 0.2rem 1.2rem 0.5rem;
   border: 0;
 }
 

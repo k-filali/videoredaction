@@ -507,7 +507,7 @@ class IoUTracker:
                 end_frame=missing_end,
                 track_ids=(previous.track_id, new_state.track_id),
                 message=(
-                    f"similar tracks are separated by frames "
+                    f"similar {new_state.class_name.replace('_', ' ')}s are separated by frames "
                     f"{missing_start}-{missing_end}"
                 ),
             )

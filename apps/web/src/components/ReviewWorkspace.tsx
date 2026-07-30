@@ -463,8 +463,12 @@ export function ReviewWorkspace({ videoId, onBack, onNotify }: ReviewWorkspacePr
   const handleMutationFailure = useCallback(
     async (mutationError: unknown) => {
       if (mutationError instanceof ApiError && mutationError.status === 409) {
-        await reloadSnapshot().catch(() => undefined);
-        onNotify("Review changed elsewhere. The latest revision is now loaded.", "info");
+        try {
+          await reloadSnapshot();
+          onNotify("Review state refreshed. Please retry your change.", "info");
+        } catch {
+          onNotify("Could not refresh review state. Try reloading the page.", "error");
+        }
       } else {
         onNotify(
           mutationError instanceof Error ? mutationError.message : "Review action failed",

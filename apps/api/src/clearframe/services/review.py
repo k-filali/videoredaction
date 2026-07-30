@@ -134,7 +134,11 @@ def build_review_snapshot(
     actions = session.scalars(actions_query.order_by(ReviewAction.revision))
     for action in actions:
         _apply_state_payload(snapshot, action.after_state)
-        snapshot.revision = action.revision
+
+    if through_revision is not None:
+        snapshot.revision = through_revision
+    else:
+        snapshot.revision = video.review_revision
 
     return snapshot
 
