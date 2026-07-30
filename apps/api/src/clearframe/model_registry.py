@@ -55,6 +55,9 @@ class DetectionThresholds(StrictModel):
     confidence: float = Field(ge=0.0, le=1.0)
     nms_iou: float = Field(ge=0.0, le=1.0)
     min_size_pixels: int = Field(gt=0)
+    # Rejects geometrically implausible boxes such as burned-in camera
+    # overlays, which are far wider than any real plate.
+    max_aspect_ratio: float | None = Field(default=None, gt=0.0)
 
 
 class WeightSpec(StrictModel):

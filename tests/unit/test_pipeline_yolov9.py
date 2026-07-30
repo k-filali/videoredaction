@@ -385,3 +385,64 @@ def test_yolov9_serializes_cuda_session_inference(tmp_path: Path) -> None:
     assert results == [[]] * 12
     assert session.maximum_active_calls == 1
     assert detector.max_concurrency == 1
+
+
+def _overlay_and_plate_detections() -> NDArray[np.float32]:
+    """Two boxes in 384x384 model space for a 400x200 frame.
+
+    Letterbox scale is 0.96 with pad_y 96, so these map back to a plate-shaped
+    box (96x48 px, 2.0:1) and a banner-shaped box (360x40 px, 9.0:1) that
+    stands in for a burned-in camera overlay.
+    """
+    return np.asarray(
+        [
+            [0, 96.0, 144.0, 188.16, 190.08, 0, 0.9],
+            [0, 9.6, 100.8, 355.2, 139.2, 0, 0.9],
+        ],
+        dtype=np.float32,
+    )
+
+
+def test_yolov9_rejects_overlay_shaped_boxes(tmp_path: Path) -> None:
+    session = _StubSession(_overlay_and_plate_detections())
+    detector = OnnxRuntimeYoloV9PlateDetector(
+        _model_file(tmp_path),
+        confidence_threshold=0.5,
+        min_plate_size_pixels=8,
+        max_aspect_ratio=3.5,
+        _factory=lambda _path, _providers: session,
+        _available_providers=lambda: ("CPUExecutionProvider",),
+    )
+    frame = np.full((200, 400, 3), (10, 20, 30), dtype=np.uint8)
+
+    proposals = detector.detect(frame, DetectionContext(frame_index=0, timestamp_ms=0))
+
+    assert len(proposals) == 1
+    box = proposals[0].bbox
+    aspect = ((box.x2 - box.x1) * 400) / ((box.y2 - box.y1) * 200)
+    assert aspect == pytest.approx(2.0, abs=0.05)
+
+
+def test_yolov9_keeps_wide_boxes_without_an_aspect_limit(tmp_path: Path) -> None:
+    session = _StubSession(_overlay_and_plate_detections())
+    detector = OnnxRuntimeYoloV9PlateDetector(
+        _model_file(tmp_path),
+        confidence_threshold=0.5,
+        min_plate_size_pixels=8,
+        _factory=lambda _path, _providers: session,
+        _available_providers=lambda: ("CPUExecutionProvider",),
+    )
+    frame = np.full((200, 400, 3), (10, 20, 30), dtype=np.uint8)
+
+    proposals = detector.detect(frame, DetectionContext(frame_index=0, timestamp_ms=0))
+
+    assert len(proposals) == 2
+
+
+def test_yolov9_rejects_invalid_aspect_configuration(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="max_aspect_ratio must be positive"):
+        OnnxRuntimeYoloV9PlateDetector(
+            _model_file(tmp_path),
+            max_aspect_ratio=0.0,
+            _available_providers=lambda: ("CPUExecutionProvider",),
+        )

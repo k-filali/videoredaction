@@ -153,6 +153,7 @@ class OnnxRuntimeYoloV9PlateDetector:
         *,
         confidence_threshold: float = 0.5,
         min_plate_size_pixels: int = 8,
+        max_aspect_ratio: float | None = None,
         _factory: SessionFactory = create_onnx_session,
         _available_providers: ProviderDiscovery = discover_execution_providers,
     ) -> None:
@@ -160,10 +161,13 @@ class OnnxRuntimeYoloV9PlateDetector:
             raise ValueError("confidence_threshold must be between zero and one")
         if min_plate_size_pixels <= 0:
             raise ValueError("min_plate_size_pixels must be positive")
+        if max_aspect_ratio is not None and max_aspect_ratio <= 0.0:
+            raise ValueError("max_aspect_ratio must be positive")
 
         self._model_path = model_path.expanduser().resolve()
         self._confidence_threshold = confidence_threshold
         self._min_plate_size_pixels = min_plate_size_pixels
+        self._max_aspect_ratio = max_aspect_ratio
         self._session: OnnxSession | None = None
         self._input_name: str | None = None
         self._provider: str | None = None
@@ -278,9 +282,16 @@ class OnnxRuntimeYoloV9PlateDetector:
                 float(height),
                 max(0.0, (y2 - letterbox.pad_y) / letterbox.scale),
             )
+            box_width = frame_x2 - frame_x1
+            box_height = frame_y2 - frame_y1
             if (
-                frame_x2 - frame_x1 < self._min_plate_size_pixels
-                or frame_y2 - frame_y1 < self._min_plate_size_pixels
+                box_width < self._min_plate_size_pixels
+                or box_height < self._min_plate_size_pixels
+            ):
+                continue
+            if (
+                self._max_aspect_ratio is not None
+                and box_width / box_height > self._max_aspect_ratio
             ):
                 continue
 

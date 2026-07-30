@@ -11,9 +11,13 @@ models:
     supported_classes:
       - license_plate
     thresholds:
-      confidence: 0.30
+      # Measured on bodycam footage: real plates run 1.6-2.6:1 in pixels while
+      # burned-in camera overlays run 4.3-6.9:1, so 3.5 separates them with
+      # margin on both sides.
+      confidence: 0.25
       nms_iou: 0.45
       min_size_pixels: 8
+      max_aspect_ratio: 3.5
     weights:
       source: local
       path: weights/license_plate_detection_yolov9t_384.onnx

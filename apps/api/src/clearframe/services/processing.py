@@ -429,6 +429,7 @@ class ProcessingService:
                     model_path,
                     confidence_threshold=entry.thresholds.confidence,
                     min_plate_size_pixels=entry.thresholds.min_size_pixels,
+                    max_aspect_ratio=entry.thresholds.max_aspect_ratio,
                 )
             raise DetectorSelectionError(
                 f"{entry.id}: YOLOv9 adapter must support exactly one known class"
@@ -718,9 +719,13 @@ class ProcessingService:
             raise ProcessingValidationError("review proxy contained no decodable frames")
 
         context.update(0.76, "linking detections")
+        # Small plates flicker in and out of detection, so allow a track to
+        # bridge roughly two seconds of dropout. Association still has to pass
+        # the motion gate, and gaps are interpolated between real observations
+        # rather than extrapolated past the last one.
         tracker = IoUTracker(
             iou_threshold=0.3,
-            max_gap=max(sample_every_frames * 3, round(fps)),
+            max_gap=max(sample_every_frames * 6, round(fps * 2)),
             materialize_interpolated=False,
         )
         tracks = tracker.track(tracking_proposals)
