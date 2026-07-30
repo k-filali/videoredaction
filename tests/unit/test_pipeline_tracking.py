@@ -257,3 +257,68 @@ def test_smoothing_passes_short_tracks_through() -> None:
     )
 
     assert smooth_track_points(points) == points
+
+
+def provisional_detection(
+    frame_index: int,
+    *,
+    x: float = 0.1,
+    y: float = 0.2,
+    confidence: float = 0.15,
+) -> DetectionProposal:
+    return DetectionProposal(
+        frame_index=frame_index,
+        timestamp_ms=frame_index * 100,
+        class_name="license_plate",
+        bbox=NormalizedBox(x1=x, y1=y, x2=x + 0.2, y2=y + 0.2),
+        confidence=confidence,
+        detector_name="test",
+        detector_version="1",
+        provisional=True,
+    )
+
+
+def test_provisional_detections_extend_tracks_without_starting_them() -> None:
+    tracker = IoUTracker()
+
+    tracks = tracker.track(
+        [
+            detection(0),
+            provisional_detection(1, x=0.11),
+            provisional_detection(2, x=0.12),
+            detection(3, x=0.13),
+        ]
+    )
+
+    assert len(tracks) == 1
+    assert [point.frame_index for point in tracks[0].points] == [0, 1, 2, 3]
+
+
+def test_provisional_detections_alone_never_create_a_track() -> None:
+    tracker = IoUTracker()
+
+    tracks = tracker.track(
+        [provisional_detection(0), provisional_detection(1, x=0.5)]
+    )
+
+    assert tracks == ()
+
+
+def test_confident_detections_claim_tracks_before_provisional_ones() -> None:
+    """A weak box must not steal the track from the confident detection."""
+    tracker = IoUTracker()
+
+    tracks = tracker.track(
+        [
+            detection(0, x=0.10),
+            # Same frame: the provisional box sits slightly closer to the
+            # previous position, but the confident one must win the match.
+            provisional_detection(1, x=0.105),
+            detection(1, x=0.115),
+        ]
+    )
+
+    assert len(tracks) == 1
+    linked = tracks[0].points[-1]
+    assert linked.bbox.x1 == pytest.approx(0.115)
+    assert linked.confidence == pytest.approx(0.9)

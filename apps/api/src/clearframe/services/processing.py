@@ -428,6 +428,7 @@ class ProcessingService:
                 return OnnxRuntimeYoloV9PlateDetector(
                     model_path,
                     confidence_threshold=entry.thresholds.confidence,
+                    tracking_confidence=entry.thresholds.tracking_confidence,
                     min_plate_size_pixels=entry.thresholds.min_size_pixels,
                     max_aspect_ratio=entry.thresholds.max_aspect_ratio,
                 )
@@ -753,6 +754,9 @@ class ProcessingService:
             "fps": round(fps, 6),
             "detections": len(observations),
             "tracker_detections": len(tracking_proposals),
+            "provisional_detections": sum(
+                1 for proposal in tracking_proposals if proposal.provisional
+            ),
             "nms_suppressed": sum(item.nms_suppressed for item in observations),
             "tracks": len(tracks),
             "keyframes": keyframe_count,

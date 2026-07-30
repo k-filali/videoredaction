@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from clearframe.model_registry import (
     DEFAULT_REGISTRY_PATH,
     AdapterKind,
+    DetectionThresholds,
     ModelRegistryError,
     load_model_registry,
     resolve_weight_path,
@@ -170,3 +171,22 @@ def test_disabled_future_slot_must_be_complete_before_enablement(tmp_path: Path)
     _write_registry(registry_path, model)
     with pytest.raises(ValidationError, match="explicit license"):
         load_model_registry(registry_path)
+
+
+def test_tracking_confidence_must_sit_below_the_spawn_threshold() -> None:
+    with pytest.raises(ValidationError, match="tracking_confidence cannot exceed"):
+        DetectionThresholds(
+            confidence=0.30,
+            tracking_confidence=0.40,
+            nms_iou=0.45,
+            min_size_pixels=8,
+        )
+
+
+def test_plate_detector_declares_a_two_stage_tracking_floor() -> None:
+    """ByteTrack-style association needs weak detections to reach the tracker."""
+    plate = load_model_registry().get("yolov9t-plate")
+
+    assert plate.thresholds.tracking_confidence is not None
+    assert plate.thresholds.tracking_confidence < plate.thresholds.confidence
+    assert plate.thresholds.max_aspect_ratio == 3.5

@@ -152,6 +152,7 @@ class OnnxRuntimeYoloV9PlateDetector:
         model_path: Path,
         *,
         confidence_threshold: float = 0.5,
+        tracking_confidence: float | None = None,
         min_plate_size_pixels: int = 8,
         max_aspect_ratio: float | None = None,
         _factory: SessionFactory = create_onnx_session,
@@ -159,6 +160,12 @@ class OnnxRuntimeYoloV9PlateDetector:
     ) -> None:
         if not 0.0 <= confidence_threshold <= 1.0:
             raise ValueError("confidence_threshold must be between zero and one")
+        if tracking_confidence is not None and not (
+            0.0 <= tracking_confidence <= confidence_threshold
+        ):
+            raise ValueError(
+                "tracking_confidence must be between zero and confidence_threshold"
+            )
         if min_plate_size_pixels <= 0:
             raise ValueError("min_plate_size_pixels must be positive")
         if max_aspect_ratio is not None and max_aspect_ratio <= 0.0:
@@ -166,6 +173,11 @@ class OnnxRuntimeYoloV9PlateDetector:
 
         self._model_path = model_path.expanduser().resolve()
         self._confidence_threshold = confidence_threshold
+        # Weak detections are emitted so the tracker can use them for
+        # association, flagged provisional so they never start a track.
+        self._emit_threshold = (
+            confidence_threshold if tracking_confidence is None else tracking_confidence
+        )
         self._min_plate_size_pixels = min_plate_size_pixels
         self._max_aspect_ratio = max_aspect_ratio
         self._session: OnnxSession | None = None
@@ -259,7 +271,7 @@ class OnnxRuntimeYoloV9PlateDetector:
             if (
                 batch_index != 0.0
                 or class_id != float(_PLATE_CLASS_ID)
-                or confidence < self._confidence_threshold
+                or confidence < self._emit_threshold
                 or confidence > 1.0
                 or x2 <= x1
                 or y2 <= y1
@@ -309,6 +321,7 @@ class OnnxRuntimeYoloV9PlateDetector:
                     confidence=confidence,
                     detector_name=self.name,
                     detector_version=self.version,
+                    provisional=confidence < self._confidence_threshold,
                 )
             )
         return sorted(proposals, key=_sort_key)

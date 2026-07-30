@@ -34,6 +34,10 @@ class DetectionProposal:
     confidence: float
     detector_name: str
     detector_version: str
+    # Scored below the detector's spawn threshold. Provisional detections may
+    # extend an existing track but never start one, so weak evidence improves
+    # continuity without inventing objects.
+    provisional: bool = False
     attributes: Mapping[str, AttributeValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

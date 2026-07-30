@@ -11,12 +11,16 @@ models:
     supported_classes:
       - license_plate
     thresholds:
+      # Small plates flicker below the spawn threshold for a frame or two.
+      # Detections between tracking_confidence and confidence keep an existing
+      # track alive without creating new ones.
+      confidence: 0.30
+      tracking_confidence: 0.10
+      nms_iou: 0.45
+      min_size_pixels: 8
       # Measured on bodycam footage: real plates run 1.6-2.6:1 in pixels while
       # burned-in camera overlays run 4.3-6.9:1, so 3.5 separates them with
       # margin on both sides.
-      confidence: 0.25
-      nms_iou: 0.45
-      min_size_pixels: 8
       max_aspect_ratio: 3.5
     weights:
       source: local

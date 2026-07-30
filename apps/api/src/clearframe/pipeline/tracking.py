@@ -305,41 +305,58 @@ class IoUTracker:
                 state.active = False
                 self._active_states.pop(state.track_id)
 
-        candidates: list[
-            tuple[int, float, float, float, float, str, int, _TrackState]
-        ] = []
-        for detection_index, detection in enumerate(ordered):
-            for state in self._active_states.values():
-                if state.class_name != detection.class_name:
-                    continue
-                candidate = self._association_candidate(
-                    state,
-                    detection,
-                    detection_index=detection_index,
-                    frame_index=frame_index,
-                )
-                if candidate is not None:
-                    candidates.append(candidate)
-
+        # Two-stage association. Confident detections claim tracks first, then
+        # provisional ones are offered to whatever is still unmatched. This
+        # keeps a flickering object attached to its track without letting weak
+        # evidence spawn spurious tracks.
         matched_tracks: set[str] = set()
         matched_detections: set[int] = set()
         assignments: list[tuple[_TrackState, int]] = []
-        for *_, detection_index, state in sorted(candidates):
-            if state.track_id in matched_tracks or detection_index in matched_detections:
-                continue
-            matched_tracks.add(state.track_id)
-            matched_detections.add(detection_index)
-            assignments.append((state, detection_index))
+        confident = [
+            index for index, item in enumerate(ordered) if not item.provisional
+        ]
+        provisional = [
+            index for index, item in enumerate(ordered) if item.provisional
+        ]
+        for tier in (confident, provisional):
+            candidates: list[
+                tuple[int, float, float, float, float, str, int, _TrackState]
+            ] = []
+            for detection_index in tier:
+                detection = ordered[detection_index]
+                for state in self._active_states.values():
+                    if state.class_name != detection.class_name:
+                        continue
+                    if state.track_id in matched_tracks:
+                        continue
+                    candidate = self._association_candidate(
+                        state,
+                        detection,
+                        detection_index=detection_index,
+                        frame_index=frame_index,
+                    )
+                    if candidate is not None:
+                        candidates.append(candidate)
+
+            for *_, detection_index, state in sorted(candidates):
+                if (
+                    state.track_id in matched_tracks
+                    or detection_index in matched_detections
+                ):
+                    continue
+                matched_tracks.add(state.track_id)
+                matched_detections.add(detection_index)
+                assignments.append((state, detection_index))
 
         updates: list[TrackPoint] = []
         for state, detection_index in assignments:
             detection = ordered[detection_index]
             updates.extend(self._append_detection(state, detection))
 
-        for detection_index, detection in enumerate(ordered):
+        for detection_index in confident:
             if detection_index in matched_detections:
                 continue
-            state = self._new_track(detection)
+            state = self._new_track(ordered[detection_index])
             updates.append(state.last_point)
             self._warn_if_fragmented(state)
 
