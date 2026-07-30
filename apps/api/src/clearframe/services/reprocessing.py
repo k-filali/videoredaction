@@ -114,6 +114,12 @@ class _CVTracker(Protocol):
 
 
 TrackerFactory = Callable[[], _CVTracker]
+# Tracked candidates per second of footage. Reviewers do not need a suggestion
+# on every frame of 60fps video, and each one costs a decode plus a tracker
+# update.
+_PROPAGATION_SAMPLES_PER_SECOND = 20
+# Upper bound on frames held in memory for one propagation pass.
+_MAX_PROPAGATION_FRAMES = 400
 ALLOWED_ACTIONS = frozenset(
     {
         ReviewActionType.MOVE_REGION,
@@ -749,7 +755,18 @@ class ReprocessingService:
         fps: float,
         tracker_factory: TrackerFactory,
     ) -> list[_Candidate] | None:
-        seed_frame = self._read_frame(capture, seed.frame_index)
+        stride = self._propagation_stride(
+            fps,
+            span_frames=end_frame - start_frame,
+        )
+        backward = list(range(seed.frame_index - stride, start_frame - 1, -stride))
+        forward = list(range(seed.frame_index + stride, end_frame + 1, stride))
+        buffered = self._read_ascending(
+            capture,
+            sorted({seed.frame_index, *backward, *forward}),
+        )
+
+        seed_frame = buffered.get(seed.frame_index)
         if seed_frame is None:
             raise ReprocessingValidationError("corrected seed frame could not be decoded")
         height, width = seed_frame.shape[:2]
@@ -763,8 +780,8 @@ class ReprocessingService:
         candidates: list[_Candidate] = []
         initialized = False
         for direction, indices in (
-            ("backward", range(seed.frame_index - 1, start_frame - 1, -1)),
-            ("forward", range(seed.frame_index + 1, end_frame + 1)),
+            ("backward", backward),
+            ("forward", forward),
         ):
             tracker = tracker_factory()
             result = tracker.init(seed_frame, initial_box)
@@ -773,7 +790,7 @@ class ReprocessingService:
             initialized = True
             previous = seed.bbox
             for frame_index in indices:
-                frame = self._read_frame(capture, frame_index)
+                frame = buffered.get(frame_index)
                 if frame is None:
                     break
                 success, raw_box = tracker.update(frame)
@@ -787,6 +804,7 @@ class ReprocessingService:
                 if candidate_box is None or not self._conservative_step(
                     previous,
                     candidate_box,
+                    steps=stride,
                 ):
                     break
                 distance = abs(frame_index - seed.frame_index)
@@ -870,10 +888,53 @@ class ReprocessingService:
         return candidates
 
     @staticmethod
+    def _propagation_stride(fps: float, *, span_frames: int) -> int:
+        """Frames to advance between tracked candidates.
+
+        High frame rates carry far more frames than reviewers need, so sample
+        at a fixed rate in time and widen further if the window would exceed
+        the buffered-frame budget.
+        """
+        rate = fps if fps > 0 else float(_PROPAGATION_SAMPLES_PER_SECOND)
+        stride = max(1, round(rate / _PROPAGATION_SAMPLES_PER_SECOND))
+        while span_frames // stride > _MAX_PROPAGATION_FRAMES:
+            stride += 1
+        return stride
+
+    @staticmethod
     def _read_frame(capture: cv2.VideoCapture, frame_index: int) -> Frame | None:
         capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         success, frame = capture.read()
         return cast(Frame, frame) if success else None
+
+    @staticmethod
+    def _read_ascending(
+        capture: cv2.VideoCapture,
+        indices: Sequence[int],
+    ) -> dict[int, Frame]:
+        """Decode the requested frames while seeking exactly once.
+
+        Seeking to an arbitrary frame makes H.264 decode forward from the
+        previous keyframe, so seeking per frame costs orders of magnitude more
+        than walking the stream once and grabbing what is needed.
+        """
+        if not indices:
+            return {}
+        wanted = set(indices)
+        first, last = indices[0], indices[-1]
+        capture.set(cv2.CAP_PROP_POS_FRAMES, first)
+        frames: dict[int, Frame] = {}
+        current = first
+        while current <= last:
+            if current in wanted:
+                success, frame = capture.read()
+                if not success:
+                    break
+                frames[current] = cast(Frame, frame)
+            elif not capture.grab():
+                break
+            current += 1
+        return frames
 
     @classmethod
     def _box_at_frame(
@@ -921,7 +982,15 @@ class ReprocessingService:
         )
 
     @staticmethod
-    def _conservative_step(previous: NormalizedBox, current: NormalizedBox) -> bool:
+    def _conservative_step(
+        previous: NormalizedBox,
+        current: NormalizedBox,
+        *,
+        steps: int = 1,
+    ) -> bool:
+        # Allowances scale with the frame gap: sampling every Nth frame means
+        # a subject legitimately travels N times as far between candidates.
+        span = max(1, steps)
         previous_area = previous.area()
         area_ratio = current.area() / previous_area
         previous_center = ((previous.x1 + previous.x2) / 2, (previous.y1 + previous.y2) / 2)
@@ -932,6 +1001,6 @@ class ReprocessingService:
         )
         return (
             0.5 <= area_ratio <= 2.0
-            and displacement <= 0.15
-            and previous.iou(current) >= 0.05
+            and displacement <= min(0.45, 0.15 * span)
+            and previous.iou(current) >= 0.05 / span
         )

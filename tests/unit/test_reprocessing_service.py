@@ -2,6 +2,7 @@ from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
 from threading import Event
+from typing import cast
 
 import cv2
 import numpy as np
@@ -696,3 +697,68 @@ def test_runtime_provides_a_working_csrt_tracker() -> None:
 
     assert located
     assert box[0] > 55, f"tracker did not follow the square: {box}"
+
+
+def test_propagation_stride_samples_by_time_and_caps_buffer() -> None:
+    stride_at_60 = ReprocessingService._propagation_stride(60.0, span_frames=360)
+    stride_at_30 = ReprocessingService._propagation_stride(30.0, span_frames=180)
+    stride_at_24 = ReprocessingService._propagation_stride(24.0, span_frames=144)
+
+    # ~20 candidates per second regardless of source frame rate.
+    assert stride_at_60 == 3
+    assert stride_at_30 == 2
+    assert stride_at_24 == 1
+
+    # A very long window widens the stride so the buffer stays bounded.
+    wide = ReprocessingService._propagation_stride(60.0, span_frames=100_000)
+    assert 100_000 // wide <= 400
+
+
+def test_read_ascending_decodes_requested_frames_with_one_seek(
+    tmp_path: Path,
+) -> None:
+    """The CSRT path used to seek per frame, which dominated job runtime."""
+
+    class _CountingCapture:
+        def __init__(self, capture: cv2.VideoCapture) -> None:
+            self._capture = capture
+            self.seeks = 0
+
+        def set(self, prop: int, value: float) -> bool:
+            if prop == cv2.CAP_PROP_POS_FRAMES:
+                self.seeks += 1
+            return bool(self._capture.set(prop, value))
+
+        def read(self) -> tuple[bool, object]:
+            return self._capture.read()
+
+        def grab(self) -> bool:
+            return bool(self._capture.grab())
+
+    media = MediaProcessor(None)
+    source = generate_test_video(tmp_path / "seek.mp4", media, duration_seconds=2.0)
+    raw = cv2.VideoCapture(str(source))
+    counting = _CountingCapture(raw)
+    try:
+        wanted = [2, 5, 8, 11]
+
+        frames = ReprocessingService._read_ascending(
+            cast(cv2.VideoCapture, counting), wanted
+        )
+
+        assert sorted(frames) == wanted
+        assert all(frame is not None for frame in frames.values())
+        assert counting.seeks == 1, f"expected a single seek, made {counting.seeks}"
+    finally:
+        raw.release()
+
+
+def test_conservative_step_scales_allowance_with_the_frame_gap() -> None:
+    # A wide box so the moved copy still overlaps; the point under test is the
+    # displacement allowance, not the overlap guard.
+    previous = NormalizedBox(x1=0.30, y1=0.40, x2=0.60, y2=0.60)
+    moved = NormalizedBox(x1=0.50, y1=0.40, x2=0.80, y2=0.60)
+
+    # 0.20 normalized is too far for a single frame, plausible across three.
+    assert not ReprocessingService._conservative_step(previous, moved)
+    assert ReprocessingService._conservative_step(previous, moved, steps=3)
