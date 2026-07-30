@@ -477,6 +477,55 @@ class MediaProcessor:
         )
         self.probe(destination)
 
+    @staticmethod
+    def _tracking_proxy_arguments(source: Path, destination: Path) -> list[str]:
+        return [
+            "-y",
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            # Propagation never reads audio.
+            "-an",
+            "-vf",
+            (
+                "scale=w='min(960,iw)':h='min(540,ih)':"
+                "force_original_aspect_ratio=decrease:force_divisible_by=2"
+            ),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "32",
+            # Frequent keyframes keep the initial seek cheap.
+            "-g",
+            "30",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ]
+
+    def generate_tracking_proxy(self, source: Path, destination: Path) -> None:
+        """Derive a small propagation copy from the review proxy.
+
+        The frame rate is deliberately inherited so frame indices recorded
+        against the review proxy address the same moment here.
+        """
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        self._run(
+            self._tracking_proxy_arguments(source, destination),
+            timeout=14400,
+            failure_message="tracking proxy generation failed",
+        )
+        self.probe(destination)
+
     def generate_thumbnail(
         self,
         source: Path,

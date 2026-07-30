@@ -1,7 +1,9 @@
 import subprocess
 from pathlib import Path
 
+import cv2
 import pytest
+from tests.helpers import generate_test_video
 
 from clearframe.media import (
     H264_NVENC,
@@ -234,3 +236,39 @@ def test_cpu_export_encoder_uses_fast_high_quality_settings() -> None:
     assert arguments[arguments.index("-c:v") + 1] == "libx264"
     assert arguments[arguments.index("-preset") + 1] == "veryfast"
     assert arguments[arguments.index("-crf") + 1] == "18"
+
+
+def test_tracking_proxy_is_smaller_but_frame_aligned(tmp_path: Path) -> None:
+    """Track frame indices address the review proxy, so timing must match.
+
+    A tracking proxy with a different frame rate or frame count would make
+    propagation land on the wrong moment and redact the wrong region.
+    """
+    media = MediaProcessor(None)
+    review = generate_test_video(
+        tmp_path / "review.mp4",
+        media,
+        duration_seconds=2.0,
+    )
+    tracking = tmp_path / "tracking.mp4"
+
+    media.generate_tracking_proxy(review, tracking)
+
+    review_meta = media.probe(review)
+    tracking_meta = media.probe(tracking)
+
+    assert tracking_meta.fps == pytest.approx(review_meta.fps, abs=0.01)
+    assert tracking_meta.duration_ms == pytest.approx(
+        review_meta.duration_ms, abs=100
+    )
+    assert not tracking_meta.audio_present
+    assert tracking_meta.width <= min(960, review_meta.width)
+    assert tracking_meta.height <= min(540, review_meta.height)
+
+    review_frames = int(
+        cv2.VideoCapture(str(review)).get(cv2.CAP_PROP_FRAME_COUNT)
+    )
+    tracking_frames = int(
+        cv2.VideoCapture(str(tracking)).get(cv2.CAP_PROP_FRAME_COUNT)
+    )
+    assert tracking_frames == review_frames

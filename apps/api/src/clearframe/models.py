@@ -59,6 +59,7 @@ class VideoAsset(Base):
     audio_present: Mapped[bool | None] = mapped_column(Boolean)
     original_uri: Mapped[str | None] = mapped_column(Text)
     proxy_uri: Mapped[str | None] = mapped_column(Text)
+    tracking_proxy_uri: Mapped[str | None] = mapped_column(Text)
     thumbnail_uri: Mapped[str | None] = mapped_column(Text)
     original_sha256: Mapped[str | None] = mapped_column(String(64), unique=True)
     status: Mapped[str] = mapped_column(String(32), default=VideoStatus.UPLOADING)

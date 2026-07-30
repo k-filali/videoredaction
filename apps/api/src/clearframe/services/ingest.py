@@ -28,6 +28,7 @@ from clearframe.storage import (
     sanitize_filename,
     temporary_upload_key,
     thumbnail_key,
+    tracking_proxy_key,
 )
 
 
@@ -410,6 +411,19 @@ class IngestService:
                 metadata=metadata,
             )
 
+        context.update(0.80, "generating tracking proxy")
+        tracking_uri = tracking_proxy_key(video_id)
+        try:
+            with (
+                self.storage.materialize_input(proxy_uri) as review_path,
+                self.storage.publish_output(tracking_uri) as tracking_path,
+            ):
+                self.media.generate_tracking_proxy(review_path, tracking_path)
+        except MediaError:
+            # Propagation falls back to the review proxy when this is absent.
+            self.storage.remove_file(tracking_uri)
+            tracking_uri = ""
+
         context.update(0.88, "generating thumbnail")
         thumbnail_uri = thumbnail_key(video_id)
         try:
@@ -427,6 +441,7 @@ class IngestService:
             if video is None:
                 raise IngestError("video record disappeared during proxy generation")
             video.proxy_uri = proxy_uri
+            video.tracking_proxy_uri = tracking_uri or None
             video.thumbnail_uri = thumbnail_uri or None
             video.status = VideoStatus.READY_FOR_REVIEW
             video.error_message = None

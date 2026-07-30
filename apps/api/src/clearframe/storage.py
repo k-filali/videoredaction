@@ -81,6 +81,16 @@ def proxy_key(video_id: str) -> str:
     return f"proxies/{video_id}/proxy.mp4"
 
 
+def tracking_proxy_key(video_id: str) -> str:
+    """Small copy used for reviewer-edit propagation.
+
+    Context propagation only needs a few seconds of frames, so downloading the
+    full review proxy per edit dominates job time. This artifact keeps the
+    review proxy's frame timing so track frame indices stay valid.
+    """
+    return f"tracking/{video_id}/tracking.mp4"
+
+
 def thumbnail_key(video_id: str) -> str:
     return f"thumbnails/{video_id}/poster.jpg"
 
@@ -193,6 +203,10 @@ class LocalStorage:
     @staticmethod
     def proxy_uri(video_id: str) -> str:
         return proxy_key(video_id)
+
+    @staticmethod
+    def tracking_proxy_uri(video_id: str) -> str:
+        return tracking_proxy_key(video_id)
 
     @staticmethod
     def thumbnail_uri(video_id: str) -> str:

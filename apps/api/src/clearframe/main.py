@@ -25,7 +25,7 @@ from clearframe.middleware import (
 from clearframe.observability import RequestTraceMiddleware, configure_observability
 from clearframe.services.container import ServiceContainer
 
-SCHEMA_HEAD = "a1c5e8d20b39"
+SCHEMA_HEAD = "b8f31d94ae27"
 
 
 @asynccontextmanager

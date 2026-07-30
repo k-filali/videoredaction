@@ -529,10 +529,16 @@ class ReprocessingService:
             raise ReprocessingValidationError("review proxy is not ready")
         if video.fps is None or video.fps <= 0:
             raise ReprocessingValidationError("video frame rate is unavailable")
+        # The tracking proxy shares the review proxy's frame timing but is an
+        # order of magnitude smaller to fetch. Videos ingested before it
+        # existed fall back to the review proxy.
+        propagation_uri = video.proxy_uri
+        if video.tracking_proxy_uri and self.storage.exists(video.tracking_proxy_uri):
+            propagation_uri = video.tracking_proxy_uri
         return _Seed(
             action_id=action.id,
             video_id=action.video_id,
-            proxy_uri=video.proxy_uri,
+            proxy_uri=propagation_uri,
             track_id=action.track_id,
             source_revision=action.revision,
             class_name=state.class_name,

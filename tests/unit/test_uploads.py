@@ -53,6 +53,10 @@ class StubMediaProcessor:
         assert metadata is not None
         destination.write_bytes(b"proxy")
 
+    def generate_tracking_proxy(self, source: Path, destination: Path) -> None:
+        assert source.is_file()
+        destination.write_bytes(b"tracking-proxy")
+
     def generate_thumbnail(
         self,
         source: Path,
