@@ -140,3 +140,43 @@ def test_startup_recovery_marks_orphaned_jobs_and_video_failed(tmp_path: Path) -
         assert recovered_video.status == VideoStatus.FAILED
 
     runner.shutdown()
+
+
+def test_actionable_failures_reach_the_reviewer_verbatim(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{(tmp_path / 'reviewer-message.db').as_posix()}")
+    database.create_schema()
+    actionable_video_id, actionable_job_id = create_queued_job(database, JobType.INGEST)
+    opaque_video_id, opaque_job_id = create_queued_job(database, JobType.DETECT)
+    executor = JobExecutor(database)
+
+    class _DuplicateLike(RuntimeError):
+        reviewer_message = "This video has already been uploaded. Open the existing copy instead."
+
+    def duplicate(_: JobContext, __: str) -> None:
+        raise _DuplicateLike("internal detail the reviewer must not see")
+
+    def leaky(_: JobContext, __: str) -> None:
+        raise RuntimeError("psycopg.OperationalError: connection refused at 10.0.0.4")
+
+    executor.register(JobType.INGEST, duplicate)
+    executor.register(JobType.DETECT, leaky)
+
+    assert executor.execute(actionable_job_id) == JobExecutionResult.FAILED
+    assert executor.execute(opaque_job_id) == JobExecutionResult.FAILED
+
+    with database.session() as session:
+        actionable_job = session.get(ProcessingJob, actionable_job_id)
+        actionable_video = session.get(VideoAsset, actionable_video_id)
+        opaque_job = session.get(ProcessingJob, opaque_job_id)
+        opaque_video = session.get(VideoAsset, opaque_video_id)
+        assert actionable_job is not None
+        assert actionable_video is not None
+        assert opaque_job is not None
+        assert opaque_video is not None
+
+        assert actionable_job.error_message == _DuplicateLike.reviewer_message
+        assert actionable_video.error_message == _DuplicateLike.reviewer_message
+
+        # Unrecognised failures must not leak internals to the workspace.
+        assert opaque_job.error_message == "Processing failed. Review the input and retry."
+        assert "psycopg" not in (opaque_video.error_message or "")

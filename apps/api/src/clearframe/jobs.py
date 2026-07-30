@@ -15,6 +15,8 @@ from clearframe.database import Database
 from clearframe.domain.enums import ExportStatus, JobStatus, JobType, VideoStatus
 from clearframe.models import ExportArtifact, ProcessingJob, VideoAsset
 
+_MAX_REVIEWER_MESSAGE_LENGTH = 200
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -76,6 +78,19 @@ class JobExecutionResult(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     NOT_CLAIMED = "not_claimed"
+
+
+def _reviewer_message(error: BaseException) -> str | None:
+    """Return a reviewer-facing message when a failure is actionable.
+
+    Handlers raise domain errors that carry `reviewer_message` when the
+    reviewer can do something about the failure. Everything else keeps the
+    generic wording so internal details never reach the workspace.
+    """
+    message = getattr(error, "reviewer_message", None)
+    if isinstance(message, str) and message.strip():
+        return message.strip()[:_MAX_REVIEWER_MESSAGE_LENGTH]
+    return None
 
 
 def _fail_job(
@@ -155,6 +170,7 @@ class JobExecutor:
         )
         heartbeat.start()
         handler_failed = False
+        handler_message: str | None = None
         try:
             handler(
                 JobContext(self.database, job_id, self.lease_duration),
@@ -162,6 +178,7 @@ class JobExecutor:
             )
         except Exception as exc:
             handler_failed = True
+            handler_message = _reviewer_message(exc)
             self.logger.exception(
                 "job_execution_failed",
                 job_id=job_id,
@@ -175,7 +192,7 @@ class JobExecutor:
                 self.logger.warning("job_heartbeat_stop_timed_out", job_id=job_id)
 
         if handler_failed:
-            self._mark_failed(job_id)
+            self._mark_failed(job_id, handler_message)
             return JobExecutionResult.FAILED
         if not self._mark_completed(job_id):
             self.logger.error("job_completion_rejected", job_id=job_id)
@@ -238,7 +255,7 @@ class JobExecutor:
             session.commit()
             return completion.rowcount == 1
 
-    def _mark_failed(self, job_id: str) -> None:
+    def _mark_failed(self, job_id: str, message: str | None = None) -> None:
         with self.database.session() as session:
             job = session.get(ProcessingJob, job_id)
             if job is None:
@@ -247,7 +264,7 @@ class JobExecutor:
                 session,
                 job,
                 stage="failed",
-                message="Processing failed. Review the input and retry.",
+                message=message or "Processing failed. Review the input and retry.",
             )
             session.commit()
 

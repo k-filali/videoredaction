@@ -48,6 +48,13 @@ class DirectUploadStateError(IngestError):
 
 
 class DuplicateVideoError(IngestError):
+    # Surfaced verbatim to reviewers: resumable uploads only discover the
+    # duplicate once the bytes are hashed, so this fails inside the ingest job
+    # where the default message would wrongly blame the file.
+    reviewer_message = (
+        "This video has already been uploaded. Open the existing copy instead."
+    )
+
     def __init__(self, existing_video_id: str) -> None:
         super().__init__("this video has already been uploaded")
         self.existing_video_id = existing_video_id
